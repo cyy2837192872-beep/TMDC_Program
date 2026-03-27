@@ -13,28 +13,12 @@ dataset_generator.py — MoS₂ moiré CNN 训练数据集生成器
 - 每张图独立随机化：噪声强度、模糊半径、仿射畸变
 - 三种 split：train / val / test = 8:1:1
 
-退化模型 v2（基于文献真实 AFM 图像特征改进）
-----------------------------------------------
-原有退化：
-1. 各向同性高斯噪声  — 电子噪声
-2. 高斯模糊          — 有限空间分辨率（针尖卷积）
-3. 随机仿射畸变      — 热漂移、压电非线性
-4. 随机裁剪          — 视野不完整
-
-v2 新增退化（参照文献真实 AFM 特征）：
-5. 线性背景倾斜      — 样品未完全水平导致低频背景
-   参数依据：Nat. Commun. 2020（Liao et al.）等文献中 tMoS₂ AFM
-             图像均需平面校正，倾斜幅度约 10–30% peak-to-peak
-6. 方向性热漂移      — 慢扫描轴（y方向）漂移远大于快扫描轴（x方向）
-   参数依据：CVD TB-MoS₂ AFM 图（PMC10794196）明确指出非真空环境
-             热漂移导致 FFT 图案变形，y方向漂移约为 x方向 3倍
-7. 扫描行噪声        — AFM 逐行扫描引入的水平条纹
-   参数依据：小角度 tMoS₂ AFM 图像（moiré 高度调制 ~0.157 nm，
-             Nat. Commun. 2024 MoS₂/WSe₂ 1.1°样品）中行噪声
-             幅度约为 moiré 信号的 5–20%
-
-退化施加顺序（对应真实成像物理过程）：
-  仿真 → 背景倾斜 → 方向性仿射 → 模糊 → 扫描行噪声 → 各向同性噪声 → 归一化 → 裁剪
+畸变模型（模拟真实 AFM 图像退化）
+----------------------------------
+1. 高斯噪声   — 电子噪声
+2. 高斯模糊   — 有限空间分辨率
+3. 仿射畸变   — 热漂移、压电非线性（FFT 最怕这个）
+4. 随机裁剪   — 视野不完整
 
 运行方式
 --------
@@ -83,21 +67,18 @@ BLUR_RANGE   = (0.0, 2.0)    # 高斯模糊（px），模拟针尖半径卷积
 SCALE_RANGE  = (0.9, 1.1)    # 各向异性缩放
 
 # v2：方向性热漂移（替代原来的各向同性 SHEAR_RANGE）
-# 文献依据：非真空 AFM 热漂移主要沿慢扫描轴（y方向）累积
-# PMC10794196 (CVD TB-MoS₂): "thermal drift is a typical challenge
-# for AFM in non-vacuum environments"，y方向漂移约为 x方向 3×
-SHEAR_X_RANGE = (-0.05, 0.05)   # 快扫描轴（x）：小
-SHEAR_Y_RANGE = (-0.15, 0.15)   # 慢扫描轴（y）：大，约 3× x方向
+# 非真空 AFM 热漂移主要沿慢扫描轴（y方向）累积，y 方向漂移约为 x 方向 3×
+# 文献依据：PMC10794196 (CVD TB-MoS₂)
+SHEAR_X_RANGE = (-0.05, 0.05)   # 快扫描轴（x）
+SHEAR_Y_RANGE = (-0.15, 0.15)   # 慢扫描轴（y），约 3× x 方向
 
-# v2 新增：线性背景倾斜
-# 样品未完全水平时图像叠加低频斜面背景，moiré 信号在其上
-# 参数范围：倾斜幅度 0–30% peak-to-peak，方向随机
+# v2 新增：线性背景倾斜（模拟样品未水平，需平面校正前的原始图像）
+# 参数范围：倾斜幅度 0–30% peak-to-peak
 TILT_AMP_RANGE = (0.0, 0.3)
 
-# v2 新增：扫描行噪声幅度（相对 peak-to-peak）
-# 文献依据：tMoS₂/WSe₂ 1.1° 样品 moiré 高度调制 ~157 pm
-# （Nat. Commun. 2024, doi:10.1038/s41467-024-53083-x）
-# 行噪声约为 moiré 信号的 5–20%，对应归一化图像 0.0–0.15
+# v2 新增：扫描行噪声（AFM 逐行扫描引入的水平条纹）
+# MoS₂/WSe₂ 1.1° 样品 moiré 高度调制 ~157 pm，行噪声约为信号的 5–20%
+# 文献依据：Nat. Commun. 2024, doi:10.1038/s41467-024-53083-x
 ROW_NOISE_RANGE = (0.0, 0.15)
 
 
@@ -133,162 +114,132 @@ def apply_affine_distortion(img, shear_x, shear_y, scale_x, scale_y):
     """
     仿射畸变：模拟 AFM 热漂移和压电非线性
 
-    v2 改进：shear_y（慢扫描轴）参数范围设为 shear_x 的 3 倍，
+    v2：shear_y（慢扫描轴）参数范围设为 shear_x 的 3 倍，
     反映真实 AFM 热漂移的方向性特征。
-
-    这是 FFT 方法最怕的退化类型：畸变后 moiré 条纹不再严格周期，
-    FFT 峰展宽，频率估算偏移。
     """
     n = img.shape[0]
     cx, cy = n / 2, n / 2
-
     yi, xi = np.mgrid[0:n, 0:n]
-    dx = xi - cx
-    dy = yi - cy
+    dx, dy = xi - cx, yi - cy
     xi_src = cx + scale_x * dx + shear_x * dy
     yi_src = cy + shear_y * dx + scale_y * dy
-
     coords = np.array([yi_src.ravel(), xi_src.ravel()])
-    img_dist = map_coordinates(img, coords, order=1,
-                               mode='reflect').reshape(n, n)
-    return img_dist
+    return map_coordinates(img, coords, order=1, mode='reflect').reshape(n, n)
 
 
 def apply_background_tilt(img, tilt_amp, ax, ay):
     """
-    线性背景倾斜（v2 新增）
-
-    模拟样品未完全水平时 AFM 图像叠加的低频斜面背景。
-    实验中需要做平面校正（plane subtraction）才能看到 moiré 信号，
-    此退化模拟校正前的原始图像状态。
-
-    参数
-    ----
-    tilt_amp : 倾斜幅度（相对 peak-to-peak，0–0.3）
-    ax, ay   : 倾斜方向（均匀分布在 [-1, 1]，归一化后使用）
-
-    文献依据
-    --------
-    tMoS₂ 文献中 AFM 图像普遍需要平面校正，参见：
-    Liao et al., Nat. Commun. 2020（doi:10.1038/s41467-020-16056-4）
+    线性背景倾斜（v2 新增）：模拟样品未完全水平时的低频斜面背景。
+    文献依据：tMoS₂ 文献中 AFM 图像普遍需要平面校正。
     """
     n = img.shape[0]
     x = np.linspace(0.0, 1.0, n)
     X, Y = np.meshgrid(x, x)
-    # 归一化方向向量，保证幅度可控
     norm = max(abs(ax) + abs(ay), 1e-6)
-    tilt = tilt_amp * (ax / norm * X + ay / norm * Y)
-    return img + tilt
+    return img + tilt_amp * (ax / norm * X + ay / norm * Y)
 
 
 def apply_row_noise(img, row_noise_amp, rng):
     """
-    扫描行噪声（v2 新增）
-
-    AFM 逐行扫描时，每行有独立的随机偏置，产生水平条纹。
-    这是普通 AFM 图像中最常见的系统性噪声，在 2D 材料
-    moiré 成像中尤为明显。
-
-    参数
-    ----
-    row_noise_amp : 行噪声幅度（相对 peak-to-peak，0–0.15）
-
-    文献依据
-    --------
-    MoS₂/WSe₂ 1.1° 样品 moiré 高度调制 ~157 pm
+    扫描行噪声（v2 新增）：AFM 逐行扫描引入的水平条纹偏置。
+    文献依据：MoS₂/WSe₂ 1.1° 样品 moiré 高度调制 ~157 pm
     （Nat. Commun. 2024, doi:10.1038/s41467-024-53083-x）
-    行噪声通常为 moiré 信号的 5–20%，对应归一化图像 0–0.15
     """
     if row_noise_amp < 1e-4:
         return img
-    row_offsets = rng.standard_normal(img.shape[0]) * row_noise_amp
-    return img + row_offsets[:, np.newaxis]   # 每行加独立偏置（水平条纹）
+    return img + rng.standard_normal(img.shape[0]) * row_noise_amp
 
 
 def generate_sample(theta_deg, rng, img_size=IMG_SIZE):
     """
-    生成单个训练样本：仿真 + 随机退化 + 裁剪到目标尺寸
+    生成单个训练样本：仿真 + 连续重构 + v2 退化 + 裁剪
 
-    使用固定物理视野（FIXED_FOV_NM），确保不同角度图像的
-    条纹密度随角度变化，CNN 能从中学习角度信息。
+    连续晶格重构模型（v3，无 if 硬切换）
+    -------------------------------------
+    将原来的 if θ<2°/else 分段结构改为连续插值函数，消除 2° 处的
+    人工不连续性，更符合真实晶格重构从完全发展到消失的物理过渡。
+
+    strength = clip(1 - θ/2, 0, 1)：
+      θ = 0°  → 1.0：完全 AB/BA 三角畴，强锐化
+      θ = 1°  → 0.5：三角畴与正弦调制各半（过渡区）
+      θ ≥ 2° → 0.0：纯正弦调制，退化为 real(ψ)
+
+    数学验证：strength=0 时 R_sharp→R，phase_quant 权重→0，
+    img = R·cos(Phi) = real(ψ)，与原 else 分支完全一致。
 
     v2 退化施加顺序（对应真实成像物理过程）：
       仿真 → 背景倾斜 → 方向性仿射 → 模糊 → 扫描行噪声 → 各向同性噪声 → 归一化 → 裁剪
     """
-    # ── 1. 物理仿真（固定视野，ppp 随角度变化）──────────────
+    # ── 1. 物理参数（固定视野）──────────────────────────────
     actual_ppp = FIXED_FOV_NM / moire_period(theta_deg)
     actual_ppp = max(4.0, actual_ppp)
-    img, fov_nm, L_nm = generate_moire_raw(theta_deg, ppp=actual_ppp, n=512)
+    L_nm       = moire_period(theta_deg)
+    fov_nm     = 512 * (L_nm / actual_ppp)
 
-    # ── 2. 小角度 AB/BA 两态晶格重构（θ < 2°）──────────────
-    # 文献依据：Weston et al., Nat. Nanotechnol. 2020
-    # （doi:10.1038/s41565-020-0682-9）
-    # θ < 2° 时出现三角形畴重构，AB/BA 两类堆叠域交替排列。
-    # 用 Im(ψ) 符号区分两类域，相位量化到 {0, π} 两态。
-    if theta_deg < 2.0:
-        theta_rad_s = np.radians(theta_deg)
-        L_s         = moire_period(theta_deg)
-        q_s         = 2.0 * np.pi / L_s
-        fov_s       = 512 * (L_s / actual_ppp)
-        x_s         = np.linspace(0.0, fov_s, 512, endpoint=False)
-        X_s, Y_s    = np.meshgrid(x_s, x_s)
-        psi = np.zeros((512, 512), dtype=complex)
-        for k in range(3):
-            phi = theta_rad_s / 2.0 + np.radians(60.0 * k)
-            psi += np.exp(1j * (q_s * np.cos(phi) * X_s + q_s * np.sin(phi) * Y_s))
-        strength    = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
-        alpha       = 1.0 + strength * 8.0
-        R           = np.abs(psi)
-        Phi         = np.angle(psi)
-        R_sharp     = np.tanh(alpha * R / R.max()) * R.max()
-        # AB/BA 两态模型：Im(ψ) 符号区分两类堆叠域
-        domain_sign = np.sign(np.imag(psi))           # +1=AB, -1=BA
-        phase_quant = (domain_sign + 1) / 2 * np.pi  # AB→0, BA→π
-        Phi_recon   = (1 - strength) * Phi + strength * phase_quant
-        img         = R_sharp * np.cos(Phi_recon)
+    # ── 2. 计算复数场 ψ = Σ exp(i ΔG·r)（所有角度统一）────
+    theta_rad = np.radians(theta_deg)
+    q         = 2.0 * np.pi / L_nm
+    x         = np.linspace(0.0, fov_nm, 512, endpoint=False)
+    X, Y      = np.meshgrid(x, x)
+    psi       = np.zeros((512, 512), dtype=complex)
+    for k in range(3):
+        phi  = theta_rad / 2.0 + np.radians(60.0 * k)
+        psi += np.exp(1j * (q * np.cos(phi) * X + q * np.sin(phi) * Y))
 
-    # ── 3. 背景倾斜（v2 新增，在仿射之前施加）───────────────
-    # 物理顺序：样品倾斜是静态背景，先于扫描引入的漂移
+    # ── 3. 连续晶格重构（无 if，strength 平滑插值）──────────
+    # 物理依据：Weston et al., Nat. Nanotechnol. 2020
+    # 晶格重构在 θ < 2° 时主导，随转角增大连续减弱，无硬切换。
+    strength = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
+    R        = np.abs(psi)
+    Phi      = np.angle(psi)
+
+    # R_sharp：strength=0 → R（不锐化），strength=1 → tanh 强锐化
+    R_sharp = ((1.0 - strength) * R
+               + strength * np.tanh(strength * 8.0 * R / (R.max() + 1e-9)) * R.max())
+
+    # AB/BA 两态相位量化（Im(ψ) 符号区分两类堆叠域）
+    domain_sign = np.sign(np.imag(psi))
+    phase_quant = (domain_sign + 1) / 2.0 * np.pi   # AB→0, BA→π
+    Phi_recon   = (1.0 - strength) * Phi + strength * phase_quant
+
+    img = (R_sharp * np.cos(Phi_recon)).astype(np.float64)
+
+    # ── 4. 背景倾斜（v2，物理上先于扫描漂移）───────────────
     tilt_amp = rng.uniform(*TILT_AMP_RANGE)
     if tilt_amp > 0.01:
-        ax = rng.uniform(-1.0, 1.0)
-        ay = rng.uniform(-1.0, 1.0)
-        img = apply_background_tilt(img, tilt_amp, ax, ay)
+        img = apply_background_tilt(img, tilt_amp,
+                                    rng.uniform(-1.0, 1.0),
+                                    rng.uniform(-1.0, 1.0))
 
-    # ── 4. 方向性仿射畸变（v2 改进：y 方向漂移更大）────────
-    # 快扫描轴（x）: ±0.05，慢扫描轴（y）: ±0.15（约 3× x方向）
-    shear_x = rng.uniform(*SHEAR_X_RANGE)
-    shear_y = rng.uniform(*SHEAR_Y_RANGE)
-    scale_x = rng.uniform(*SCALE_RANGE)
-    scale_y = rng.uniform(*SCALE_RANGE)
-    img = apply_affine_distortion(img, shear_x, shear_y, scale_x, scale_y)
+    # ── 5. 方向性仿射畸变（v2，y 方向漂移更大）─────────────
+    img = apply_affine_distortion(img,
+                                  rng.uniform(*SHEAR_X_RANGE),
+                                  rng.uniform(*SHEAR_Y_RANGE),
+                                  rng.uniform(*SCALE_RANGE),
+                                  rng.uniform(*SCALE_RANGE))
 
-    # ── 5. 高斯模糊（针尖卷积，在噪声之前施加）─────────────
-    # 物理顺序：有限分辨率对信号模糊，发生在检测电子噪声之前
+    # ── 6. 高斯模糊（针尖卷积，在噪声之前）─────────────────
     blur = rng.uniform(*BLUR_RANGE)
     if blur > 0.1:
         img = gaussian_filter(img, sigma=blur)
 
-    # ── 6. 扫描行噪声（v2 新增，在各向同性噪声之前）────────
-    # 物理顺序：行噪声是系统性偏置（每行独立），不被模糊
-    row_noise_amp = rng.uniform(*ROW_NOISE_RANGE)
-    img = apply_row_noise(img, row_noise_amp, rng)
+    # ── 7. 扫描行噪声（v2，系统性偏置，不被模糊）───────────
+    img = apply_row_noise(img, rng.uniform(*ROW_NOISE_RANGE), rng)
 
-    # ── 7. 各向同性高斯噪声（电子噪声）─────────────────────
+    # ── 8. 各向同性高斯噪声（电子噪声）─────────────────────
     noise = rng.uniform(*NOISE_RANGE)
     if noise > 0.01:
         ptp = img.max() - img.min()
         img = img + noise * ptp * rng.standard_normal(img.shape)
 
-    # ── 8. 归一化 ────────────────────────────────────────────
+    # ── 9. 归一化 ────────────────────────────────────────────
     img = (img - img.min()) / (img.max() - img.min() + 1e-9)
 
-    # ── 9. 随机裁剪到目标尺寸 ────────────────────────────────
+    # ── 10. 随机裁剪到目标尺寸 ───────────────────────────────
     n = img.shape[0]
     if n > img_size:
-        max_offset = n - img_size
-        oy = rng.integers(0, max_offset + 1)
-        ox = rng.integers(0, max_offset + 1)
+        oy = rng.integers(0, n - img_size + 1)
+        ox = rng.integers(0, n - img_size + 1)
         img = img[oy:oy + img_size, ox:ox + img_size]
 
     return img.astype(np.float32), fov_nm
@@ -307,9 +258,10 @@ def generate_dataset(n_total=TOTAL_SAMPLES, seed=42):
     print(f'生成 MoS₂ moiré 数据集：{n_total} 样本，IMG={IMG_SIZE}×{IMG_SIZE}')
     print(f'晶格常数 a = {A_NM} nm，固定视野 = {FIXED_FOV_NM:.1f} nm')
     print(f'θ 范围：{THETA_MIN}° ~ {THETA_MAX}°')
+    print(f'重构模型：连续插值（无 if 硬切换，strength = clip(1-θ/2, 0, 1)）')
     print(f'退化 v2：noise={NOISE_RANGE}, blur={BLUR_RANGE}')
-    print(f'        shear_x={SHEAR_X_RANGE}, shear_y={SHEAR_Y_RANGE}（方向性热漂移）')
-    print(f'        tilt={TILT_AMP_RANGE}（背景倾斜）, row_noise={ROW_NOISE_RANGE}（扫描行噪声）')
+    print(f'        shear_x={SHEAR_X_RANGE}, shear_y={SHEAR_Y_RANGE}')
+    print(f'        tilt={TILT_AMP_RANGE}, row_noise={ROW_NOISE_RANGE}')
     print()
 
     thetas = np.linspace(THETA_MIN, THETA_MAX, n_total)

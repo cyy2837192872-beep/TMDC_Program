@@ -122,25 +122,40 @@ def generate_moire(theta_deg, a_nm=A_NM, n=N, ppp=PPP,
 
     q_m = 2.0 * np.pi / L_nm   # moiré 波矢大小
 
-    # 改后（替换成这个）
     psi = np.zeros((n, n), dtype=complex)
     for k in range(3):
         phi = theta_rad / 2.0 + np.radians(60.0 * k)
         psi += np.exp(1j * (q_m * np.cos(phi) * X + q_m * np.sin(phi) * Y))
 
-    if theta_deg < 2.0:
-        strength    = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
-        alpha       = 1.0 + strength * 8.0
-        R           = np.abs(psi)
-        Phi         = np.angle(psi)
-        R_sharp     = np.tanh(alpha * R / R.max()) * R.max()
-        # AB/BA 两态模型：Im(psi) 符号区分两类堆叠域（破坏空间反演对称）
-        domain_sign = np.sign(np.imag(psi))          # +1=AB, -1=BA
-        phase_quant = (domain_sign + 1) / 2 * np.pi  # AB→0, BA→π
-        Phi_recon   = (1 - strength) * Phi + strength * phase_quant
-        img         = R_sharp * np.cos(Phi_recon)
-    else:
-        img = np.real(psi)
+    # ── 连续晶格重构模型 ─────────────────────────────────────
+    # 将原来的 if θ<2° / else 硬切换改为连续插值，消除 2° 处的人工不连续性。
+    #
+    # strength = clip(1 - θ/2, 0, 1) 是重构强度权重：
+    #   θ = 0°  → strength = 1.0（完全 AB/BA 三角畴，强锐化边界）
+    #   θ = 1°  → strength = 0.5（三角畴与正弦调制各半，过渡区）
+    #   θ ≥ 2° → strength = 0.0（纯正弦调制，退化为 real(ψ)）
+    #
+    # 物理依据：Weston et al. Nat. Nanotechnol. 2020 表明晶格重构在
+    # θ < 2° 时主导图案，随转角增大连续减弱，无实验证据支持硬切换。
+    #
+    # 数学验证（strength=0 时公式连续退化）：
+    #   R_sharp → R，phase_quant 权重 → 0，Phi_recon → Phi
+    #   img = R·cos(Phi) = real(ψ)  ✓ 与原 else 分支完全一致
+    strength = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
+    R        = np.abs(psi)
+    Phi      = np.angle(psi)
+
+    # R_sharp：strength=0 时退化为 R（无锐化），strength=1 时强锐化
+    R_sharp = ((1.0 - strength) * R
+               + strength * np.tanh(strength * 8.0 * R / (R.max() + 1e-9)) * R.max())
+
+    # AB/BA 两态相位量化（strength=0 时权重为零，自然消失）
+    # Im(ψ) 符号区分两类堆叠域：+1=AB（相位→0），-1=BA（相位→π）
+    domain_sign = np.sign(np.imag(psi))
+    phase_quant = (domain_sign + 1) / 2.0 * np.pi   # AB→0, BA→π
+    Phi_recon   = (1.0 - strength) * Phi + strength * phase_quant
+
+    img = R_sharp * np.cos(Phi_recon)
 
     # 退化模型（先模糊后加噪，符合实际成像顺序）
     if blur > 0:
