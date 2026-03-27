@@ -1,0 +1,3 @@
+outputs/*.png
+outputs/*.pt
+outputs/*.csv
