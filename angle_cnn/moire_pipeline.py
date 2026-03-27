@@ -134,7 +134,9 @@ def generate_moire(theta_deg, a_nm=A_NM, n=N, ppp=PPP,
         R           = np.abs(psi)
         Phi         = np.angle(psi)
         R_sharp     = np.tanh(alpha * R / R.max()) * R.max()
-        phase_quant = np.round(Phi / (np.pi / 3)) * (np.pi / 3)
+        # AB/BA 两态模型：Im(psi) 符号区分两类堆叠域（破坏空间反演对称）
+        domain_sign = np.sign(np.imag(psi))          # +1=AB, -1=BA
+        phase_quant = (domain_sign + 1) / 2 * np.pi  # AB→0, BA→π
         Phi_recon   = (1 - strength) * Phi + strength * phase_quant
         img         = R_sharp * np.cos(Phi_recon)
     else:
