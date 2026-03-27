@@ -147,7 +147,8 @@ def apply_row_noise(img, row_noise_amp, rng):
     """
     if row_noise_amp < 1e-4:
         return img
-    return img + rng.standard_normal(img.shape[0]) * row_noise_amp
+    row_bias = rng.standard_normal(img.shape[0]) * row_noise_amp
+    return img + row_bias[:, None]
 
 
 def generate_sample(theta_deg, rng, img_size=IMG_SIZE):
