@@ -283,7 +283,15 @@ if __name__ == '__main__':
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_cnt  = 0
-            torch.save(model.state_dict(), MODEL_PATH)
+            # 保存模型权重及训练元数据，方便复现和推理时校验
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'theta_min': THETA_MIN,
+                'theta_max': THETA_MAX,
+                'epoch': epoch,
+                'val_loss': val_loss,
+                'val_mae_deg': val_mae,
+            }, MODEL_PATH)
             flag = ' ✓'
         else:
             patience_cnt += 1
@@ -303,7 +311,8 @@ if __name__ == '__main__':
             break
 
     print(f'\n加载最佳模型: {MODEL_PATH}')
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    ckpt = torch.load(MODEL_PATH, map_location=device)
+    model.load_state_dict(ckpt['model_state_dict'] if isinstance(ckpt, dict) else ckpt)
     test_loss, test_mae = evaluate(model, test_loader, criterion, device)
     print(f'测试集 MAE: {test_mae:.4f}°')
     print(f'测试集 Loss: {test_loss:.6f}')

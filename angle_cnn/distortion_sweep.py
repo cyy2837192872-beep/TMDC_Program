@@ -70,54 +70,60 @@ def apply_affine(img, shear_x, shear_y, scale_x, scale_y):
 
 def make_image(theta_deg, shear, seed):
     """
-    生成与训练集完全一致的图像（固定 FOV + AB/BA 重构 + 受控畸变）
+    生成与训练集完全一致的图像（固定 FOV + 连续晶格重构 + 受控畸变）
     返回：img_128 (128x128 float32), img_512 (512x512), fov_nm
+
+    晶格重构模型与 dataset_generator.py / moire_pipeline.py 完全一致：
+      strength = clip(1 - θ/2, 0, 1)，无 if 硬切换，连续插值。
+      R_sharp 公式：(1-s)*R + s*tanh(s*8*R/R.max)*R.max
     """
     rng = np.random.default_rng(seed)
 
     # 1. 固定 FOV -> ppp（与 dataset_generator 一致）
     actual_ppp = FIXED_FOV_NM / moire_period(theta_deg)
     actual_ppp = max(4.0, actual_ppp)
+    L_nm       = moire_period(theta_deg)
+    fov_nm     = 512 * (L_nm / actual_ppp)
 
-    img, fov_nm, L_nm = generate_moire_raw(theta_deg, ppp=actual_ppp, n=512)
+    # 2. 计算复数场 ψ = Σ exp(i ΔG·r)（所有角度统一，无 if 分支）
+    theta_rad = np.radians(theta_deg)
+    q         = 2.0 * np.pi / L_nm
+    x         = np.linspace(0.0, fov_nm, 512, endpoint=False)
+    X, Y      = np.meshgrid(x, x)
+    psi       = np.zeros((512, 512), dtype=complex)
+    for k in range(3):
+        phi  = theta_rad / 2.0 + np.radians(60.0 * k)
+        psi += np.exp(1j * (q * np.cos(phi) * X + q * np.sin(phi) * Y))
 
-    # 2. AB/BA 两态重构（theta < 2 度，与 dataset_generator 一致）
-    if theta_deg < 2.0:
-        theta_rad = np.radians(theta_deg)
-        q = 2.0 * np.pi / L_nm
-        fov = 512 * (L_nm / actual_ppp)
-        x = np.linspace(0.0, fov, 512, endpoint=False)
-        X, Y = np.meshgrid(x, x)
-        psi = np.zeros((512, 512), dtype=complex)
-        for k in range(3):
-            phi = theta_rad / 2.0 + np.radians(60.0 * k)
-            psi += np.exp(1j * (q * np.cos(phi) * X + q * np.sin(phi) * Y))
-        strength    = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
-        alpha       = 1.0 + strength * 8.0
-        R           = np.abs(psi)
-        Phi         = np.angle(psi)
-        R_sharp     = np.tanh(alpha * R / R.max()) * R.max()
-        domain_sign = np.sign(np.imag(psi))
-        phase_quant = (domain_sign + 1) / 2 * np.pi
-        Phi_recon   = (1 - strength) * Phi + strength * phase_quant
-        img         = R_sharp * np.cos(Phi_recon)
+    # 3. 连续晶格重构（与 dataset_generator.py 完全一致，无 if 硬切换）
+    # 物理依据：Weston et al., Nat. Nanotechnol. 2020
+    # strength=0 时退化为纯正弦（θ≥2°），strength=1 时强锐化（θ=0°）
+    strength = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
+    R        = np.abs(psi)
+    Phi      = np.angle(psi)
+    R_sharp  = ((1.0 - strength) * R
+                + strength * np.tanh(strength * 8.0 * R / (R.max() + 1e-9)) * R.max())
+    domain_sign = np.sign(np.imag(psi))
+    phase_quant = (domain_sign + 1) / 2.0 * np.pi   # AB→0, BA→π
+    Phi_recon   = (1.0 - strength) * Phi + strength * phase_quant
+    img = (R_sharp * np.cos(Phi_recon)).astype(np.float64)
 
-    # 3. 仿射畸变（shear 幅度受控，方向随 seed 随机）
+    # 4. 仿射畸变（shear 幅度受控，方向随 seed 随机）
     sx = rng.uniform(-shear, shear) if shear > 0 else 0.0
     sy = rng.uniform(-shear, shear) if shear > 0 else 0.0
     sc = 1.0 + rng.uniform(0, shear * 0.4)
     img_dist = apply_affine(img, sx, sy, sc, 1.0 / sc)
 
-    # 4. 模糊 + 噪声
+    # 5. 模糊 + 噪声
     img_dist = gaussian_filter(img_dist, sigma=BLUR)
     ptp = img_dist.max() - img_dist.min()
     img_dist = img_dist + NOISE * ptp * rng.standard_normal(img_dist.shape)
 
-    # 5. 归一化
+    # 6. 归一化
     img_dist = (img_dist - img_dist.min()) / (img_dist.max() - img_dist.min() + 1e-9)
     img_dist = img_dist.astype(np.float32)
 
-    # 6. 中心裁剪 -> 128x128（与训练一致）
+    # 7. 中心裁剪 -> 128x128（与训练一致）
     n = img_dist.shape[0]
     oy = (n - IMG_SIZE) // 2
     ox = (n - IMG_SIZE) // 2
@@ -270,7 +276,8 @@ if __name__ == '__main__':
     MODEL_PATH = os.path.join(SCRIPT_DIR, 'outputs', 'best_model.pt')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model  = build_model().to(device)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    ckpt = torch.load(MODEL_PATH, map_location=device)
+    model.load_state_dict(ckpt['model_state_dict'] if isinstance(ckpt, dict) else ckpt)
     model.eval()
     print(f'device: {device},  model: {MODEL_PATH}\n')
 

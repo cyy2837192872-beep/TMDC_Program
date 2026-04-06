@@ -34,8 +34,9 @@ MODEL_PATH   = os.path.join(OUT_DIR,  'best_model.pt')
 
 # ── 导入自己的模块 ────────────────────────────────────────
 sys.path.insert(0, SCRIPT_DIR)
-from moire_pipeline import extract_angle_fft, A_NM   # MoS₂ a=0.316 nm
+from moire_pipeline import extract_angle_fft, A_NM, moire_period   # MoS₂ a=0.316 nm
 from train_cnn import build_model, THETA_MIN, THETA_MAX
+from dataset_generator import FIXED_FOV_NM
 
 # ── 中文字体 ──────────────────────────────────────────────
 import matplotlib.font_manager as fm
@@ -76,15 +77,47 @@ def cnn_predict(model, images, device, batch_size=64):
 
 # ── FFT 批量推理 ──────────────────────────────────────────
 
-def fft_predict_batch(images, fovs):
+def fft_predict_batch(images, fovs, labels=None):
     """
     对一批图像逐张运行 FFT 提取角度
     使用 MoS₂ 晶格常数（a=0.316 nm，从 moire_pipeline 导入）
-    fovs : (N,) 每张图对应的真实视野大小（nm）
+
+    Parameters
+    ----------
+    images : (N, H, W) float32 ndarray，测试集裁剪图（128×128）
+    fovs   : (N,) 数据集保存的视野大小（nm），对应 512px 原图
+    labels : (N,) 每张图对应的真实转角（度），用于计算正确的 actual_ppp。
+             若为 None，则使用默认 ppp=20（精度较低）。
+
+    物理说明
+    --------
+    数据集生成时 fov_nm 对应 512px 原图，但测试集图像已裁剪为 128px。
+    FFT 必须使用裁剪图的**实际物理视野**：
+        fov_actual = fov_nm × (img_px / 512)
+    这对应真实实验：AFM 扫描大区域后截取子区域分析，
+    视野变小导致 FFT 频率分辨率下降（δθ 增大），是物理上正确的行为。
+
+    ppp 的修正：
+        actual_ppp_512 = FIXED_FOV_NM / moire_period(θ)   （512px 图的 ppp）
+        actual_ppp_128 = actual_ppp_512 × (128 / 512)      （128px 图的 ppp）
+    等价于：ppp 按像素数等比缩放，峰位 r_peak = n_img/ppp 保持不变。
     """
     preds = []
     for i, (img, fov) in enumerate(zip(images, fovs)):
-        th, unc, _ = extract_angle_fft(img, fov_nm=float(fov))
+        img_px = img.shape[0]   # 实际图像像素数（128）
+        scale  = img_px / 512   # 裁剪比例（128/512 = 0.25）
+
+        # 修正为裁剪图的实际物理视野
+        fov_actual = float(fov) * scale
+
+        # 根据真实 θ 计算 actual_ppp，再按裁剪比例缩放
+        if labels is not None:
+            ppp_512 = max(4.0, FIXED_FOV_NM / moire_period(float(labels[i])))
+            actual_ppp = ppp_512 * scale   # 等比缩放，使 r_peak = n_img/ppp 不变
+        else:
+            actual_ppp = 20 * scale  # 默认值按比例缩放
+
+        th, unc, _ = extract_angle_fft(img, fov_nm=fov_actual, ppp=actual_ppp)
         if th is None:
             preds.append(np.nan)
         else:
@@ -197,10 +230,19 @@ def plot_error_analysis(labels, fft_preds, cnn_preds):
     ax.set(xlabel='真实角度 θ (°)', ylabel='MAE (°)', title='各角度区间平均误差')
     ax.legend(fontsize=9); ax.grid(alpha=0.3)
 
-    # 图3：提升倍数
+    # 图3：提升倍数（NaN 保护：某 bin 无有效样本时跳过）
     ax = axes[2]
-    improvement = np.array(fft_bin_mae) / np.array(cnn_bin_mae)
-    ax.bar(theta_centers, improvement,
+    fft_arr = np.array(fft_bin_mae, dtype=float)
+    cnn_arr = np.array(cnn_bin_mae, dtype=float)
+    # 避免除以零或 NaN 导致图表断点
+    with np.errstate(invalid='ignore', divide='ignore'):
+        improvement = np.where(
+            (cnn_arr > 1e-9) & ~np.isnan(fft_arr) & ~np.isnan(cnn_arr),
+            fft_arr / cnn_arr,
+            np.nan
+        )
+    valid_mask = ~np.isnan(improvement)
+    ax.bar(theta_centers[valid_mask], improvement[valid_mask],
            width=(THETA_MAX - THETA_MIN) / 10 * 0.8,
            color='mediumseagreen', alpha=0.8)
     ax.axhline(1, color='gray', ls='--', lw=1)
@@ -274,13 +316,14 @@ if __name__ == '__main__':
     print('\n[1] CNN 推理...')
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model  = build_model().to(device)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    ckpt = torch.load(MODEL_PATH, map_location=device)
+    model.load_state_dict(ckpt['model_state_dict'] if isinstance(ckpt, dict) else ckpt)
     cnn_preds = cnn_predict(model, images_test, device)
     print(f'  完成，共 {len(cnn_preds)} 个预测')
 
     # 3. FFT 预测
     print('\n[2] FFT 提取（逐张，需要约1分钟）...')
-    fft_preds = fft_predict_batch(images_test, fovs_test)
+    fft_preds = fft_predict_batch(images_test, fovs_test, labels=labels_test)
     n_fail = np.isnan(fft_preds).sum()
     print(f'  完成，失败 {n_fail}/{len(fft_preds)} 张')
 

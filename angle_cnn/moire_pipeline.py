@@ -317,8 +317,11 @@ def show_gallery(thetas=None, save=True):
     fig, axes = plt.subplots(1, len(thetas), figsize=(4.2 * len(thetas), 4.5))
     fig.suptitle(r'MoS$_2$ moiré 图案 vs 转角（仿真）', fontsize=13, y=1.01)
 
+    # 固定视野：以最小转角的 moiré 周期为基准，所有子图共享同一物理视野
+    # 提到循环外，避免每次迭代重复计算
+    FIXED_FOV = 10 * moire_period(min(thetas))
+
     for ax, theta in zip(axes, thetas):
-        FIXED_FOV = 10 * moire_period(min(thetas))
         img, fov_nm, L_nm = generate_moire(theta, ppp=N * moire_period(theta) / FIXED_FOV)
         ax.imshow(img, cmap='afmhot', extent=[0, fov_nm, fov_nm, 0])
         ax.set_title(f'θ = {theta}°\nL = {L_nm:.1f} nm', fontsize=11)
