@@ -15,6 +15,7 @@ thesis/hust_bachelor_cse/*.log
 thesis/hust_bachelor_cse/*.out
 thesis/hust_bachelor_cse/*.toc
 thesis/hust_bachelor_cse/*.pdf
+thesis/hust_bachelor_cse/STZhongsong.ttf
 
 # OS/editor noise
 .DS_Store
