@@ -32,20 +32,19 @@ FFT 分辨率决定的角度不确定度（误差传播）：
 import numpy as np
 from scipy.ndimage import gaussian_filter, maximum_filter
 import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
-from matplotlib import rcParams
 import warnings
-warnings.filterwarnings('ignore')
 import os
+import sys
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
+
+setup_matplotlib_cjk_font()
+
 OUT = os.path.join(os.path.dirname(__file__), 'outputs')
 os.makedirs(OUT, exist_ok=True)
-
-# ── 中文字体 ──────────────────────────────────────────────────────────────────
-myfont_path = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
-fm.fontManager.addfont(myfont_path)
-font_name = fm.FontProperties(fname=myfont_path).get_name()
-rcParams['font.sans-serif'] = [font_name]
-rcParams['axes.unicode_minus'] = False
 
 # ── 全局参数 ──────────────────────────────────────────────────────────────────
 A_NM = 0.316   # MoS₂ 晶格常数 (nm)
@@ -171,15 +170,44 @@ def generate_moire(theta_deg, a_nm=A_NM, n=N, ppp=PPP,
 
 # ── FFT 角度提取 ──────────────────────────────────────────────────────────────
 
+def _subpixel_peak_2d(power: np.ndarray, row: int, col: int) -> tuple[float, float]:
+    """Parabolic sub-pixel refinement of a 2D peak position.
+
+    Fits a 1D parabola separately along each axis using the 3-point
+    neighborhood and returns the refined (row, col) in float.
+    """
+    n = power.shape[0]
+    if row <= 0 or row >= n - 1 or col <= 0 or col >= n - 1:
+        return float(row), float(col)
+    v0 = float(power[row, col])
+
+    vm_r = float(power[row - 1, col])
+    vp_r = float(power[row + 1, col])
+    denom_r = vm_r - 2 * v0 + vp_r
+    dr = 0.5 * (vm_r - vp_r) / denom_r if abs(denom_r) > 1e-12 else 0.0
+
+    vm_c = float(power[row, col - 1])
+    vp_c = float(power[row, col + 1])
+    denom_c = vm_c - 2 * v0 + vp_c
+    dc = 0.5 * (vm_c - vp_c) / denom_c if abs(denom_c) > 1e-12 else 0.0
+
+    dr = np.clip(dr, -0.5, 0.5)
+    dc = np.clip(dc, -0.5, 0.5)
+    return row + dr, col + dc
+
+
 def extract_angle_fft(image, fov_nm, a_nm=A_NM, ppp=PPP, n_peaks=6):
     """
-    从 moiré 图像中提取转角（FFT 方法）
+    从 moiré 图像中提取转角（FFT 方法 + 亚像素插值）
 
     FFT 峰位置分析：
       - 频率分辨率：df = 1/fov_nm（nm⁻¹/pixel）
       - moiré 频率：f_m = 1/L_nm
       - 峰的像素半径：r_peak = f_m / df = fov_nm/L_nm = n/ppp
       → 搜索范围：[0.4, 2.5] × (n/ppp)，远离DC也远离边界
+
+    v3 改进：对每个峰用抛物线亚像素插值，将定位精度从 ±0.5 px
+    提升到 ±0.05 px 量级，直接降低角度提取误差。
 
     Parameters
     ----------
@@ -201,14 +229,12 @@ def extract_angle_fft(image, fov_nm, a_nm=A_NM, ppp=PPP, n_peaks=6):
     Yi, Xi = np.ogrid[:n_img, :n_img]
     r_map  = np.sqrt((Xi - c)**2 + (Yi - c)**2)
 
-    # 理论峰位（像素）：r_peak = n_img / ppp
     r_peak = n_img / ppp
     r_min  = max(2.0, 0.4 * r_peak)
     r_max  = min(n_img // 3, 2.5 * r_peak)
 
     work = power * ((r_map >= r_min) & (r_map <= r_max))
 
-    # 局部极大值窗口大小：约 r_peak/3（奇数）
     win = max(3, int(r_peak / 3) * 2 + 1)
     local_max = (work == maximum_filter(work, size=win))
     valid     = local_max & (work > 0.05 * work.max())
@@ -217,13 +243,18 @@ def extract_angle_fft(image, fov_nm, a_nm=A_NM, ppp=PPP, n_peaks=6):
     if len(coords) == 0:
         return None, None, {}
 
-    # 按功率排序，取前 n_peaks 个
     pwr_at  = work[tuple(coords.T)]
     top_idx = np.argsort(pwr_at)[::-1][:n_peaks]
     coords  = coords[top_idx]
 
-    # 像素半径 → 空间频率 → moiré 周期 → 角度
-    r_px       = np.sqrt((coords[:, 1] - c)**2 + (coords[:, 0] - c)**2)
+    refined_rows = np.empty(len(coords))
+    refined_cols = np.empty(len(coords))
+    for i, (row, col) in enumerate(coords):
+        rr, rc = _subpixel_peak_2d(power, int(row), int(col))
+        refined_rows[i] = rr
+        refined_cols[i] = rc
+
+    r_px       = np.sqrt((refined_cols - c)**2 + (refined_rows - c)**2)
     L_vals     = fov_nm / r_px
     theta_vals = theta_from_period(L_vals, a_nm)
 
@@ -484,3 +515,5 @@ if __name__ == '__main__':
     plt.savefig(path, dpi=150, bbox_inches='tight')
     print(f'\n  已保存: {path}')
     plt.show()
+
+    print("\n下一步：python dataset_generator.py")

@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mos2-moire-cnn"
+version = "0.1.0"
+description = "MoS₂ moiré twist angle extraction using CNN and FFT methods"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = ["mos2", "moire", "cnn", "fft", "twist-angle", "deep-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=1.20,<2.0",
+    "scipy>=1.7,<2.0",
+    "torch>=1.13,<3.0",
+    "torchvision>=0.14,<1.0",
+    "matplotlib>=3.5,<4.0",
+]
+
+[project.optional-dependencies]
+afm = [
+    "igor2>=0.5",
+]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/mos2-moire-cnn"
+Documentation = "https://github.com/yourusername/mos2-moire-cnn#readme"
+Repository = "https://github.com/yourusername/mos2-moire-cnn"
+
+[project.scripts]
+moire-generate = "angle_cnn.dataset_generator:main"
+moire-train = "angle_cnn.train_cnn:main"
+moire-eval = "angle_cnn.eval_compare:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["angle_cnn*", "angle_cnn.core*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]

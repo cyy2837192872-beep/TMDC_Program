@@ -1,0 +1,20 @@
+# MoS2 moire CNN / FFT pipeline (Python 3.10+)
+# Core dependencies
+numpy>=1.20,<2.0
+scipy>=1.7,<2.0
+# PyTorch 2.6+ 支持 RTX 5070 Ti (Blackwell sm_120) BF16 与 torch.compile
+torch>=2.6,<3.0
+torchvision>=0.21,<1.0
+matplotlib>=3.5,<4.0
+tqdm>=4.66,<5.0
+psutil>=5.9,<7.0
+
+# AFM data import (Cypher ES / Asylum Research .ibw files)
+# Optional — only needed for real experimental data
+# igor2>=0.5
+
+# Development dependencies (optional)
+# pytest>=7.0
+# black>=23.0
+# ruff>=0.1
+# mypy>=1.0
