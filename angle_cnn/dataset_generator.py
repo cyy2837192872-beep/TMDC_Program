@@ -1,369 +1,703 @@
 #!/usr/bin/env python3
 """
-dataset_generator.py — MoS₂ moiré CNN 训练数据集生成器
-========================================================
+dataset_generator.py — MoS₂ moiré CNN 训练数据集生成器（v2：多通道 + TITAN 70 退化模型）
+=======================================================================================
 
 生成 (image, θ) 对，保存为 .npz 文件供 CNN 训练使用。
+
+v2 新增
+-------
+- 多通道支持：height / phase / amplitude（Tapping Mode 三通道）
+- TITAN 70 探针卷积效应（tip_radius ≈ 7 nm）
+- 1/f 噪声（AFM 电子学 + 热漂移）
+- 反馈环路振荡（Tapping Mode ringing）
+- 扫描方向偏移（trace/retrace 残余）
+- 默认样本数从 5000 增大到 20000
 
 数据集设计
 ----------
 - 材料：MoS₂ 转角同质结（晶格常数 a = 0.316 nm）
 - θ 范围：0.5° ~ 5.0°（均匀采样）
-- 图像尺寸：128×128 px（CNN 输入，比仿真的 512px 小，训练更快）
-- 每张图独立随机化：噪声强度、模糊半径、仿射畸变
+- 图像尺寸：128×128 px（CNN 输入）
+- 通道数：1（仅 height）或 3（height + phase + amplitude）
 - 三种 split：train / val / test = 8:1:1
-
-畸变模型（模拟真实 AFM 图像退化）
-----------------------------------
-1. 高斯噪声   — 电子噪声
-2. 高斯模糊   — 有限空间分辨率
-3. 仿射畸变   — 热漂移、压电非线性（FFT 最怕这个）
-4. 随机裁剪   — 视野不完整
 
 运行方式
 --------
-    python dataset_generator.py
+    python dataset_generator.py                          # 3通道，20000样本
+    python dataset_generator.py --channels 1             # 单通道（向后兼容）
+    python dataset_generator.py --samples 50000 --workers 4
+    python dataset_generator.py --tip-radius 7.0         # TITAN 70 探针
+    python dataset_generator.py --no-progress            # 无进度条（日志/CI）
+    python dataset_generator.py --worker-monitor         # 多进程时周期性打印子进程 CPU
 
 输出
 ----
     ~/tmdc-project/data/moire_dataset.npz
-        images_train : (N_train, 128, 128) float32
-        labels_train : (N_train,)          float32  单位：度
-        images_val   : (N_val,   128, 128) float32
-        labels_val   : (N_val,)            float32
-        images_test  : (N_test,  128, 128) float32
-        labels_test  : (N_test,)           float32
-        fovs_train/val/test : (N,)         float32  单位：nm
+        images_train : (N_train, [C,] 128, 128) float32
+        labels_train : (N_train,) float32  单位：度
+        fovs_train   : (N_train,) float32  单位：nm
+        ...（val, test 同理）
 """
 
-import numpy as np
-from scipy.ndimage import gaussian_filter, map_coordinates
+from __future__ import annotations
+
+import argparse
+import logging
 import os
 import sys
 import time
+import threading
+from concurrent.futures import ProcessPoolExecutor
+from typing import Tuple
 
-# ── 路径设置 ──────────────────────────────────────────────
+import numpy as np
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None  # type: ignore[misc, assignment]
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR   = os.path.join(SCRIPT_DIR, '..', 'data')
-os.makedirs(DATA_DIR, exist_ok=True)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
 
-# ── 从 moire_pipeline 复用物理函数（含 MoS₂ 晶格常数）──
-sys.path.insert(0, SCRIPT_DIR)
-from moire_pipeline import moire_period, A_NM
+from moire_pipeline import moire_period, A_NM  # noqa: E402
+from core.fonts import cjk_fontproperties  # noqa: E402
+from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
+from core.degrade import (  # noqa: E402
+    apply_affine_distortion,
+    apply_background_tilt,
+    apply_feedback_ringing,
+    apply_gaussian_blur,
+    apply_isotropic_gaussian_noise,
+    apply_multichannel_degradation,
+    apply_oneoverf_noise,
+    apply_row_noise,
+    apply_scan_direction_offset,
+    apply_tip_convolution,
+)
 
-# ── 数据集参数 ────────────────────────────────────────────
-TOTAL_SAMPLES = 5000       # 总样本数
-IMG_SIZE      = 128        # CNN 输入图像尺寸（px）
-PPP           = 20         # pixels per moiré period（生成时用，之后裁剪到 IMG_SIZE）
-THETA_MIN     = 0.5        # 最小转角（度）
-THETA_MAX     = 5.0        # 最大转角（度）
-FIXED_FOV_NM  = 10 * moire_period(THETA_MIN)   # 固定物理视野（基于 MoS₂ 参数）
-SPLIT_RATIO   = (0.8, 0.1, 0.1)   # train / val / test
+logger = logging.getLogger(__name__)
 
-# ── 退化参数范围（均匀采样）────────────────────────────────
-# 原有参数
-NOISE_RANGE  = (0.0, 0.5)    # 各向同性高斯噪声幅度（相对 peak-to-peak）
-BLUR_RANGE   = (0.0, 2.0)    # 高斯模糊（px），模拟针尖半径卷积
-SCALE_RANGE  = (0.9, 1.1)    # 各向异性缩放
+# ── 默认参数 ──────────────────────────────────────────────
+DEFAULT_TOTAL_SAMPLES = 50000  # GPU 快速训练：更多数据 → 更好泛化
+DEFAULT_IMG_SIZE = 128
+DEFAULT_PPP = 20
+DEFAULT_THETA_MIN = 0.5
+DEFAULT_THETA_MAX = 5.0
+DEFAULT_SEED = 42
+DEFAULT_SPLIT_RATIO = (0.8, 0.1, 0.1)
+DEFAULT_N_CHANNELS = 3
+DEFAULT_TIP_RADIUS_NM = 7.0  # TITAN 70
+DEFAULT_TIP_RADIUS_RANGE = (0.0, 7.0)  # randomise: 0 = no probe, 7 = TITAN 70
 
-# v2：方向性热漂移（替代原来的各向同性 SHEAR_RANGE）
-# 非真空 AFM 热漂移主要沿慢扫描轴（y方向）累积，y 方向漂移约为 x 方向 3×
-# 文献依据：PMC10794196 (CVD TB-MoS₂)
-SHEAR_X_RANGE = (-0.05, 0.05)   # 快扫描轴（x）
-SHEAR_Y_RANGE = (-0.15, 0.15)   # 慢扫描轴（y），约 3× x 方向
-
-# v2 新增：线性背景倾斜（模拟样品未水平，需平面校正前的原始图像）
-# 参数范围：倾斜幅度 0–30% peak-to-peak
-TILT_AMP_RANGE = (0.0, 0.3)
-
-# v2 新增：扫描行噪声（AFM 逐行扫描引入的水平条纹）
-# MoS₂/WSe₂ 1.1° 样品 moiré 高度调制 ~157 pm，行噪声约为信号的 5–20%
-# 文献依据：Nat. Commun. 2024, doi:10.1038/s41467-024-53083-x
-ROW_NOISE_RANGE = (0.0, 0.15)
+# ── 默认退化参数范围（校准到 Cypher ES + TITAN 70 + Tapping Mode）────
+# 扩展范围以提升 CNN 对分布外退化的鲁棒性
+DEFAULT_NOISE_RANGE = (0.0, 0.15)
+DEFAULT_BLUR_RANGE = (0.0, 0.5)
+DEFAULT_SCALE_RANGE = (0.97, 1.03)
+DEFAULT_SHEAR_X_RANGE = (-0.008, 0.008)
+DEFAULT_SHEAR_Y_RANGE = (-0.015, 0.015)
+DEFAULT_TILT_AMP_RANGE = (0.0, 0.08)
+DEFAULT_ROW_NOISE_RANGE = (0.0, 0.04)
+DEFAULT_ONEOVERF_RANGE = (0.0, 0.05)
+DEFAULT_RINGING_RANGE = (0.0, 0.03)
+DEFAULT_SCAN_OFFSET_RANGE = (0.0, 0.015)
 
 
-# ── 物理仿真（简化版，专为数据集生成优化）────────────────
+CHANNEL_NAMES = ("height", "phase", "amplitude")
 
-def generate_moire_raw(theta_deg, ppp=PPP, n=512,
-                       a_nm=A_NM, seed=None):
-    """
-    生成 MoS₂ moiré 图案（大图，之后再裁剪到 IMG_SIZE）
 
-    直接生成 moiré 超晶格，避免原子晶格混叠问题。
-    使用 MoS₂ 晶格常数 a = 0.316 nm。
-    """
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="MoS₂ moiré CNN 数据集生成器（v2：多通道 + TITAN 70）",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--samples", type=int, default=DEFAULT_TOTAL_SAMPLES, help="总样本数")
+    parser.add_argument("--img-size", type=int, default=DEFAULT_IMG_SIZE, help="输出图像尺寸（像素）")
+    parser.add_argument("--theta-min", type=float, default=DEFAULT_THETA_MIN, help="最小转角（度）")
+    parser.add_argument("--theta-max", type=float, default=DEFAULT_THETA_MAX, help="最大转角（度）")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="随机种子")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="并行 worker 数（默认 auto = cpu_count/2）")
+    parser.add_argument("--n-sim", type=int, default=512,
+                        help="仿真分辨率（256=快速，512=高精度）")
+    parser.add_argument("--log-theta", action="store_true",
+                        help="对数均匀 θ 采样（小角度区域更密集）")
+    parser.add_argument("--output-dir", type=str, default=None, help="输出目录")
+    parser.add_argument("--channels", type=int, default=DEFAULT_N_CHANNELS, choices=[1, 2, 3],
+                        help="通道数 (1=height, 2=height+phase, 3=height+phase+amplitude)")
+    parser.add_argument("--tip-radius", type=float, default=DEFAULT_TIP_RADIUS_NM,
+                        help="探针尖端半径 (nm)，TITAN 70 ≈ 7 nm，0 禁用")
+    parser.add_argument("--noise-max", type=float, default=DEFAULT_NOISE_RANGE[1], help="最大高斯噪声")
+    parser.add_argument("--blur-max", type=float, default=DEFAULT_BLUR_RANGE[1], help="最大模糊半径")
+    parser.add_argument("--shear-max", type=float, default=DEFAULT_SHEAR_Y_RANGE[1], help="最大剪切畸变")
+    parser.add_argument("--train-ratio", type=float, default=DEFAULT_SPLIT_RATIO[0], help="训练集比例")
+    parser.add_argument("--val-ratio", type=float, default=DEFAULT_SPLIT_RATIO[1], help="验证集比例")
+    parser.add_argument("--no-preview", action="store_true", help="不生成预览图")
+    parser.add_argument("--no-progress", action="store_true",
+                        help="禁用 tqdm 进度条（非 TTY 时默认也会关闭）")
+    parser.add_argument("--worker-monitor", action="store_true",
+                        help="多进程时每 8s 在进度条下方打印子进程 CPU%%（需 psutil）")
+    parser.add_argument("--chunksize", type=int, default=16,
+                        help="多进程任务分块大小（增大可降低进程通信开销）")
+    return parser.parse_args()
+
+
+def generate_moire_raw(theta_deg, ppp=DEFAULT_PPP, n=512, a_nm=A_NM, seed=None):
+    """Legacy single-channel generator (backward-compatible)."""
     rng = np.random.default_rng(seed)
     theta_rad = np.radians(theta_deg)
-    L_nm      = moire_period(theta_deg, a_nm)
+    L_nm = moire_period(theta_deg, a_nm)
     nm_per_px = L_nm / ppp
-    fov_nm    = n * nm_per_px
-
+    fov_nm = n * nm_per_px
     x = np.linspace(0.0, fov_nm, n, endpoint=False)
     X, Y = np.meshgrid(x, x)
-
     q_m = 2.0 * np.pi / L_nm
     img = np.zeros((n, n), dtype=np.float64)
     for k in range(3):
         phi = theta_rad / 2.0 + np.radians(60.0 * k)
         img += np.cos(q_m * np.cos(phi) * X + q_m * np.sin(phi) * Y)
-
     return img, fov_nm, L_nm
 
 
-def apply_affine_distortion(img, shear_x, shear_y, scale_x, scale_y):
+def generate_sample(
+    theta_deg: float,
+    rng: np.random.Generator,
+    img_size: int,
+    fixed_fov_nm: float,
+    n_channels: int = 1,
+    tip_radius_nm: float = 0.0,
+    tip_radius_range: Tuple[float, float] | None = None,
+    n_sim: int = 256,
+    noise_range: Tuple[float, float] = DEFAULT_NOISE_RANGE,
+    blur_range: Tuple[float, float] = DEFAULT_BLUR_RANGE,
+    scale_range: Tuple[float, float] = DEFAULT_SCALE_RANGE,
+    shear_x_range: Tuple[float, float] = DEFAULT_SHEAR_X_RANGE,
+    shear_y_range: Tuple[float, float] = DEFAULT_SHEAR_Y_RANGE,
+    tilt_amp_range: Tuple[float, float] = DEFAULT_TILT_AMP_RANGE,
+    row_noise_range: Tuple[float, float] = DEFAULT_ROW_NOISE_RANGE,
+    oneoverf_range: Tuple[float, float] = DEFAULT_ONEOVERF_RANGE,
+    ringing_range: Tuple[float, float] = DEFAULT_RINGING_RANGE,
+    scan_offset_range: Tuple[float, float] = DEFAULT_SCAN_OFFSET_RANGE,
+):
+    """Generate a single training sample with multi-channel support.
+
+    Returns
+    -------
+    img : (C, img_size, img_size) float32 if n_channels > 1, else (img_size, img_size)
+    fov_nm : float
     """
-    仿射畸变：模拟 AFM 热漂移和压电非线性
+    requested = CHANNEL_NAMES[:n_channels]
 
-    v2：shear_y（慢扫描轴）参数范围设为 shear_x 的 3 倍，
-    反映真实 AFM 热漂移的方向性特征。
-    """
-    n = img.shape[0]
-    cx, cy = n / 2, n / 2
-    yi, xi = np.mgrid[0:n, 0:n]
-    dx, dy = xi - cx, yi - cy
-    xi_src = cx + scale_x * dx + shear_x * dy
-    yi_src = cy + shear_y * dx + scale_y * dy
-    coords = np.array([yi_src.ravel(), xi_src.ravel()])
-    return map_coordinates(img, coords, order=1, mode='reflect').reshape(n, n)
+    if n_channels > 1:
+        ch_dict, fov_nm = synthesize_multichannel_moire(
+            theta_deg, fixed_fov_nm, n=n_sim, channels=requested,
+        )
+    else:
+        raw, fov_nm = synthesize_reconstructed_moire(theta_deg, fixed_fov_nm, n=n_sim)
+        ch_dict = {"height": raw}
 
+    ch_dict = {k: v.astype(np.float32, copy=False) for k, v in ch_dict.items()}
 
-def apply_background_tilt(img, tilt_amp, ax, ay):
-    """
-    线性背景倾斜（v2 新增）：模拟样品未完全水平时的低频斜面背景。
-    文献依据：tMoS₂ 文献中 AFM 图像普遍需要平面校正。
-    """
-    n = img.shape[0]
-    x = np.linspace(0.0, 1.0, n)
-    X, Y = np.meshgrid(x, x)
-    norm = max(abs(ax) + abs(ay), 1e-6)
-    return img + tilt_amp * (ax / norm * X + ay / norm * Y)
+    pixel_size_nm = fov_nm / n_sim
 
+    actual_tip_r = rng.uniform(*tip_radius_range) if tip_radius_range is not None else tip_radius_nm
 
-def apply_row_noise(img, row_noise_amp, rng):
-    """
-    扫描行噪声（v2 新增）：AFM 逐行扫描引入的水平条纹偏置。
-    文献依据：MoS₂/WSe₂ 1.1° 样品 moiré 高度调制 ~157 pm
-    （Nat. Commun. 2024, doi:10.1038/s41467-024-53083-x）
-    """
-    if row_noise_amp < 1e-4:
-        return img
-    row_bias = rng.standard_normal(img.shape[0]) * row_noise_amp
-    return img + row_bias[:, None]
+    shear_x = rng.uniform(*shear_x_range)
+    shear_y = rng.uniform(*shear_y_range)
+    scale_x = rng.uniform(*scale_range)
+    scale_y = rng.uniform(*scale_range)
+    tilt_amp = rng.uniform(*tilt_amp_range)
+    tilt_ax = rng.uniform(-1.0, 1.0)
+    tilt_ay = rng.uniform(-1.0, 1.0)
 
+    ch_dict = apply_multichannel_degradation(
+        ch_dict, rng,
+        tip_radius_nm=actual_tip_r,
+        pixel_size_nm=pixel_size_nm,
+        noise_amp=rng.uniform(*noise_range),
+        blur_sigma=rng.uniform(*blur_range),
+        oneoverf_amp=rng.uniform(*oneoverf_range),
+        oneoverf_alpha=rng.uniform(0.8, 1.5),
+        row_noise_amp=rng.uniform(*row_noise_range),
+        ringing_amp=rng.uniform(*ringing_range),
+        scan_offset_amp=rng.uniform(*scan_offset_range),
+        tilt_amp=tilt_amp, tilt_ax=tilt_ax, tilt_ay=tilt_ay,
+        shear_x=shear_x, shear_y=shear_y,
+        scale_x=scale_x, scale_y=scale_y,
+    )
 
-def generate_sample(theta_deg, rng, img_size=IMG_SIZE):
-    """
-    生成单个训练样本：仿真 + 连续重构 + v2 退化 + 裁剪
+    crops: list[np.ndarray] = []
+    oy = ox = None
+    for name in requested:
+        arr = ch_dict[name]
+        arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-9)
+        n = arr.shape[0]
+        if n > img_size:
+            if oy is None:
+                oy = rng.integers(0, n - img_size + 1)
+                ox = rng.integers(0, n - img_size + 1)
+            arr = arr[oy: oy + img_size, ox: ox + img_size]
+        crops.append(arr.astype(np.float32))
 
-    连续晶格重构模型（v3，无 if 硬切换）
-    -------------------------------------
-    将原来的 if θ<2°/else 分段结构改为连续插值函数，消除 2° 处的
-    人工不连续性，更符合真实晶格重构从完全发展到消失的物理过渡。
-
-    strength = clip(1 - θ/2, 0, 1)：
-      θ = 0°  → 1.0：完全 AB/BA 三角畴，强锐化
-      θ = 1°  → 0.5：三角畴与正弦调制各半（过渡区）
-      θ ≥ 2° → 0.0：纯正弦调制，退化为 real(ψ)
-
-    数学验证：strength=0 时 R_sharp→R，phase_quant 权重→0，
-    img = R·cos(Phi) = real(ψ)，与原 else 分支完全一致。
-
-    v2 退化施加顺序（对应真实成像物理过程）：
-      仿真 → 背景倾斜 → 方向性仿射 → 模糊 → 扫描行噪声 → 各向同性噪声 → 归一化 → 裁剪
-    """
-    # ── 1. 物理参数（固定视野）──────────────────────────────
-    actual_ppp = FIXED_FOV_NM / moire_period(theta_deg)
-    actual_ppp = max(4.0, actual_ppp)
-    L_nm       = moire_period(theta_deg)
-    fov_nm     = 512 * (L_nm / actual_ppp)
-
-    # ── 2. 计算复数场 ψ = Σ exp(i ΔG·r)（所有角度统一）────
-    theta_rad = np.radians(theta_deg)
-    q         = 2.0 * np.pi / L_nm
-    x         = np.linspace(0.0, fov_nm, 512, endpoint=False)
-    X, Y      = np.meshgrid(x, x)
-    psi       = np.zeros((512, 512), dtype=complex)
-    for k in range(3):
-        phi  = theta_rad / 2.0 + np.radians(60.0 * k)
-        psi += np.exp(1j * (q * np.cos(phi) * X + q * np.sin(phi) * Y))
-
-    # ── 3. 连续晶格重构（无 if，strength 平滑插值）──────────
-    # 物理依据：Weston et al., Nat. Nanotechnol. 2020
-    # 晶格重构在 θ < 2° 时主导，随转角增大连续减弱，无硬切换。
-    strength = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
-    R        = np.abs(psi)
-    Phi      = np.angle(psi)
-
-    # R_sharp：strength=0 → R（不锐化），strength=1 → tanh 强锐化
-    R_sharp = ((1.0 - strength) * R
-               + strength * np.tanh(strength * 8.0 * R / (R.max() + 1e-9)) * R.max())
-
-    # AB/BA 两态相位量化（Im(ψ) 符号区分两类堆叠域）
-    domain_sign = np.sign(np.imag(psi))
-    phase_quant = (domain_sign + 1) / 2.0 * np.pi   # AB→0, BA→π
-    Phi_recon   = (1.0 - strength) * Phi + strength * phase_quant
-
-    img = (R_sharp * np.cos(Phi_recon)).astype(np.float64)
-
-    # ── 4. 背景倾斜（v2，物理上先于扫描漂移）───────────────
-    tilt_amp = rng.uniform(*TILT_AMP_RANGE)
-    if tilt_amp > 0.01:
-        img = apply_background_tilt(img, tilt_amp,
-                                    rng.uniform(-1.0, 1.0),
-                                    rng.uniform(-1.0, 1.0))
-
-    # ── 5. 方向性仿射畸变（v2，y 方向漂移更大）─────────────
-    img = apply_affine_distortion(img,
-                                  rng.uniform(*SHEAR_X_RANGE),
-                                  rng.uniform(*SHEAR_Y_RANGE),
-                                  rng.uniform(*SCALE_RANGE),
-                                  rng.uniform(*SCALE_RANGE))
-
-    # ── 6. 高斯模糊（针尖卷积，在噪声之前）─────────────────
-    blur = rng.uniform(*BLUR_RANGE)
-    if blur > 0.1:
-        img = gaussian_filter(img, sigma=blur)
-
-    # ── 7. 扫描行噪声（v2，系统性偏置，不被模糊）───────────
-    img = apply_row_noise(img, rng.uniform(*ROW_NOISE_RANGE), rng)
-
-    # ── 8. 各向同性高斯噪声（电子噪声）─────────────────────
-    noise = rng.uniform(*NOISE_RANGE)
-    if noise > 0.01:
-        ptp = img.max() - img.min()
-        img = img + noise * ptp * rng.standard_normal(img.shape)
-
-    # ── 9. 归一化 ────────────────────────────────────────────
-    img = (img - img.min()) / (img.max() - img.min() + 1e-9)
-
-    # ── 10. 随机裁剪到目标尺寸 ───────────────────────────────
-    n = img.shape[0]
-    if n > img_size:
-        oy = rng.integers(0, n - img_size + 1)
-        ox = rng.integers(0, n - img_size + 1)
-        img = img[oy:oy + img_size, ox:ox + img_size]
-
-    return img.astype(np.float32), fov_nm
+    if n_channels == 1:
+        return crops[0], fov_nm
+    return np.stack(crops, axis=0), fov_nm
 
 
-# ── 主生成逻辑 ────────────────────────────────────────────
+def _subseed(master: int, index: int) -> int:
+    return int((master * 2654435761 + index * 104729) % (2**32 - 1))
 
-def generate_dataset(n_total=TOTAL_SAMPLES, seed=42):
-    """
-    生成完整数据集
 
-    θ 均匀采样后打乱，确保 train/val/test 各角度分布均匀。
-    """
+_worker_config: dict = {}
+
+
+def _init_worker(config: dict):
+    global _worker_config
+    _worker_config = config
+
+
+def _parallel_sample_worker(args: Tuple[int, float, int]) -> Tuple[int, np.ndarray, float]:
+    """返回 (样本下标, 图像, fov_nm)，便于乱序完成时写回正确位置。"""
+    idx, theta_deg, sub_seed = args
+    rng = np.random.default_rng(sub_seed)
+    im, fv = generate_sample(
+        theta_deg, rng,
+        img_size=_worker_config["img_size"],
+        fixed_fov_nm=_worker_config["fixed_fov_nm"],
+        n_channels=_worker_config["n_channels"],
+        tip_radius_nm=_worker_config["tip_radius_nm"],
+        tip_radius_range=_worker_config.get("tip_radius_range"),
+        n_sim=_worker_config["n_sim"],
+        noise_range=_worker_config["noise_range"],
+        blur_range=_worker_config["blur_range"],
+        scale_range=_worker_config["scale_range"],
+        shear_x_range=_worker_config["shear_x_range"],
+        shear_y_range=_worker_config["shear_y_range"],
+        tilt_amp_range=_worker_config["tilt_amp_range"],
+        row_noise_range=_worker_config["row_noise_range"],
+        oneoverf_range=_worker_config["oneoverf_range"],
+        ringing_range=_worker_config["ringing_range"],
+        scan_offset_range=_worker_config["scan_offset_range"],
+    )
+    return idx, im, fv
+
+
+def _stderr_is_tty() -> bool:
+    return bool(getattr(sys.stderr, "isatty", lambda: False)())
+
+
+def _want_progress(no_progress_flag: bool) -> bool:
+    return (not no_progress_flag) and _stderr_is_tty() and tqdm is not None
+
+
+def _worker_monitor_loop(stop: threading.Event, interval: float = 8.0) -> None:
+    """在独立线程中周期性打印子进程 CPU（不阻塞主线程）。"""
+    if psutil is None:
+        return
+    try:
+        me = psutil.Process()
+    except (psutil.Error, OSError):
+        return
+    while not stop.wait(interval):
+        try:
+            kids = me.children(recursive=True)
+        except (psutil.Error, OSError):
+            continue
+        if not kids:
+            continue
+        cpus = []
+        for c in kids:
+            try:
+                cpus.append(c.cpu_percent(interval=None))
+            except (psutil.Error, OSError):
+                pass
+        if not cpus:
+            continue
+        line = (
+            f"[worker-monitor] 子进程数={len(cpus)}  "
+            f"CPU min/avg/max={min(cpus):.0f}% / {sum(cpus)/len(cpus):.0f}% / {max(cpus):.0f}%"
+        )
+        if tqdm is not None:
+            tqdm.write(line, file=sys.stderr)
+        else:
+            print(line, file=sys.stderr)
+
+
+def generate_dataset(
+    n_total: int = DEFAULT_TOTAL_SAMPLES,
+    seed: int = DEFAULT_SEED,
+    parallel_workers: int | None = None,
+    img_size: int = DEFAULT_IMG_SIZE,
+    theta_min: float = DEFAULT_THETA_MIN,
+    theta_max: float = DEFAULT_THETA_MAX,
+    n_channels: int = DEFAULT_N_CHANNELS,
+    tip_radius_nm: float = DEFAULT_TIP_RADIUS_NM,
+    tip_radius_range: Tuple[float, float] | None = DEFAULT_TIP_RADIUS_RANGE,
+    n_sim: int = 256,
+    log_theta: bool = False,
+    noise_range: Tuple[float, float] = DEFAULT_NOISE_RANGE,
+    blur_range: Tuple[float, float] = DEFAULT_BLUR_RANGE,
+    scale_range: Tuple[float, float] = DEFAULT_SCALE_RANGE,
+    shear_x_range: Tuple[float, float] = DEFAULT_SHEAR_X_RANGE,
+    shear_y_range: Tuple[float, float] = DEFAULT_SHEAR_Y_RANGE,
+    tilt_amp_range: Tuple[float, float] = DEFAULT_TILT_AMP_RANGE,
+    row_noise_range: Tuple[float, float] = DEFAULT_ROW_NOISE_RANGE,
+    oneoverf_range: Tuple[float, float] = DEFAULT_ONEOVERF_RANGE,
+    ringing_range: Tuple[float, float] = DEFAULT_RINGING_RANGE,
+    scan_offset_range: Tuple[float, float] = DEFAULT_SCAN_OFFSET_RANGE,
+    no_progress: bool = False,
+    worker_monitor: bool = False,
+    chunksize: int = 16,
+):
+    if parallel_workers is None:
+        parallel_workers = int(os.environ.get("DATASET_NUM_WORKERS", "0"))
+
     rng = np.random.default_rng(seed)
+    fixed_fov_nm = 10 * moire_period(theta_min)
 
-    print(f'生成 MoS₂ moiré 数据集：{n_total} 样本，IMG={IMG_SIZE}×{IMG_SIZE}')
-    print(f'晶格常数 a = {A_NM} nm，固定视野 = {FIXED_FOV_NM:.1f} nm')
-    print(f'θ 范围：{THETA_MIN}° ~ {THETA_MAX}°')
-    print(f'重构模型：连续插值（无 if 硬切换，strength = clip(1-θ/2, 0, 1)）')
-    print(f'退化 v2：noise={NOISE_RANGE}, blur={BLUR_RANGE}')
-    print(f'        shear_x={SHEAR_X_RANGE}, shear_y={SHEAR_Y_RANGE}')
-    print(f'        tilt={TILT_AMP_RANGE}, row_noise={ROW_NOISE_RANGE}')
+    ch_label = f"{n_channels}ch ({', '.join(CHANNEL_NAMES[:n_channels])})"
+    print(f"生成 MoS₂ moiré 数据集：{n_total} 样本，IMG={img_size}×{img_size}，{ch_label}")
+    print(f"晶格常数 a = {A_NM} nm，固定视野 = {fixed_fov_nm:.1f} nm")
+    print(f"θ 范围：{theta_min}° ~ {theta_max}°")
+    if tip_radius_range is not None:
+        print(f"探针卷积：tip_radius ∈ [{tip_radius_range[0]:.1f}, {tip_radius_range[1]:.1f}] nm (随机)")
+    else:
+        print(f"探针卷积：tip_radius = {tip_radius_nm:.1f} nm {'(TITAN 70)' if tip_radius_nm > 0 else '(禁用)'}")
+    print(f"仿真分辨率：{n_sim}×{n_sim}")
+    sampling = "对数均匀（小角度密集）" if log_theta else "线性均匀"
+    print(f"θ 采样：{sampling}")
+    print(f"退化参数：noise={noise_range}, blur={blur_range}, 1/f={oneoverf_range}")
+    print(f"         shear_y={shear_y_range}, ringing={ringing_range}, scan_offset={scan_offset_range}")
+    if parallel_workers and parallel_workers > 1:
+        print(f"并行 workers: {parallel_workers}")
     print()
 
-    thetas = np.linspace(THETA_MIN, THETA_MAX, n_total)
-    idx    = rng.permutation(n_total)
+    if log_theta:
+        thetas = np.exp(np.linspace(
+            np.log(theta_min), np.log(theta_max), n_total
+        ))
+    else:
+        thetas = np.linspace(theta_min, theta_max, n_total)
+    idx = rng.permutation(n_total)
     thetas = thetas[idx]
 
-    images = np.zeros((n_total, IMG_SIZE, IMG_SIZE), dtype=np.float32)
-    fovs   = np.zeros(n_total, dtype=np.float32)
+    if n_channels > 1:
+        images = np.zeros((n_total, n_channels, img_size, img_size), dtype=np.float32)
+    else:
+        images = np.zeros((n_total, img_size, img_size), dtype=np.float32)
+    fovs = np.zeros(n_total, dtype=np.float32)
     labels = thetas.astype(np.float32)
 
     t0 = time.time()
-    for i in range(n_total):
-        images[i], fovs[i] = generate_sample(thetas[i], rng, IMG_SIZE)
 
-        if (i + 1) % 100 == 0 or i == 0:
-            elapsed = time.time() - t0
-            rate    = (i + 1) / elapsed
-            eta     = (n_total - i - 1) / rate
-            print(f'  [{i+1:>5}/{n_total}]  '
-                  f'θ={thetas[i]:5.2f}°  '
-                  f'速度={rate:.1f} img/s  '
-                  f'ETA={eta:.0f}s')
+    config = {
+        "img_size": img_size,
+        "fixed_fov_nm": fixed_fov_nm,
+        "n_channels": n_channels,
+        "tip_radius_nm": tip_radius_nm,
+        "tip_radius_range": tip_radius_range,
+        "n_sim": n_sim,
+        "noise_range": noise_range,
+        "blur_range": blur_range,
+        "scale_range": scale_range,
+        "shear_x_range": shear_x_range,
+        "shear_y_range": shear_y_range,
+        "tilt_amp_range": tilt_amp_range,
+        "row_noise_range": row_noise_range,
+        "oneoverf_range": oneoverf_range,
+        "ringing_range": ringing_range,
+        "scan_offset_range": scan_offset_range,
+    }
 
-    print(f'\n生成完成，耗时 {time.time()-t0:.1f}s')
+    use_tqdm = _want_progress(no_progress)
+    if worker_monitor and psutil is None:
+        print("警告：未安装 psutil，--worker-monitor 无效。请 pip install psutil", file=sys.stderr)
+
+    if parallel_workers and parallel_workers > 1:
+        tasks = ((i, float(thetas[i]), _subseed(seed, i)) for i in range(n_total))
+        _init_worker(config)
+        monitor_stop = threading.Event()
+        mon_th: threading.Thread | None = None
+        if worker_monitor and psutil is not None:
+            mon_th = threading.Thread(
+                target=_worker_monitor_loop, args=(monitor_stop,), daemon=True,
+            )
+        with ProcessPoolExecutor(
+            max_workers=parallel_workers,
+            initializer=_init_worker,
+            initargs=(config,),
+        ) as pool:
+            result_iter = pool.map(_parallel_sample_worker, tasks, chunksize=max(1, int(chunksize)))
+            if mon_th is not None:
+                mon_th.start()
+            pbar = None
+            if use_tqdm and tqdm is not None:
+                pbar = tqdm(
+                    result_iter,
+                    total=n_total,
+                    mininterval=0.25,
+                    unit="img",
+                    desc="生成样本",
+                    file=sys.stderr,
+                    dynamic_ncols=True,
+                )
+                result_iter = pbar
+            completed = 0
+            try:
+                for idx, im, fv in result_iter:
+                    images[idx] = im
+                    fovs[idx] = fv
+                    completed += 1
+                    if pbar is not None:
+                        pbar.set_postfix(θ=f"{thetas[idx]:.2f}°", refresh=False)
+                    elif completed == 1 or completed % 500 == 0:
+                        elapsed = time.time() - t0
+                        rate = completed / elapsed
+                        eta = (n_total - completed) / rate if rate > 0 else 0
+                        print(
+                            f"  [{completed:>5}/{n_total}]  θ={thetas[idx]:5.2f}°  "
+                            f"速度={rate:.1f} img/s  ETA={eta:.0f}s",
+                            flush=True,
+                        )
+            finally:
+                monitor_stop.set()
+                if mon_th is not None:
+                    mon_th.join(timeout=2.0)
+            if pbar is not None:
+                pbar.close()
+    else:
+        seq = range(n_total)
+        pbar_seq = None
+        if use_tqdm and tqdm is not None:
+            pbar_seq = tqdm(
+                seq, total=n_total, unit="img", desc="生成样本",
+                file=sys.stderr, dynamic_ncols=True,
+            )
+            seq = pbar_seq
+        for i in seq:
+            images[i], fovs[i] = generate_sample(
+                thetas[i], rng,
+                img_size=img_size,
+                fixed_fov_nm=fixed_fov_nm,
+                n_channels=n_channels,
+                tip_radius_nm=tip_radius_nm,
+                tip_radius_range=tip_radius_range,
+                n_sim=n_sim,
+                noise_range=noise_range,
+                blur_range=blur_range,
+                scale_range=scale_range,
+                shear_x_range=shear_x_range,
+                shear_y_range=shear_y_range,
+                tilt_amp_range=tilt_amp_range,
+                row_noise_range=row_noise_range,
+                oneoverf_range=oneoverf_range,
+                ringing_range=ringing_range,
+                scan_offset_range=scan_offset_range,
+            )
+            if pbar_seq is not None:
+                pbar_seq.set_postfix(θ=f"{thetas[i]:.2f}°", refresh=False)
+            elif (i + 1) % 500 == 0 or i == 0:
+                elapsed = time.time() - t0
+                rate = (i + 1) / elapsed
+                eta = (n_total - i - 1) / rate
+                print(
+                    f"  [{i+1:>5}/{n_total}]  θ={thetas[i]:5.2f}°  "
+                    f"速度={rate:.1f} img/s  ETA={eta:.0f}s",
+                    flush=True,
+                )
+        if pbar_seq is not None:
+            pbar_seq.close()
+
+    print(f"\n生成完成，耗时 {time.time()-t0:.1f}s")
     return images, labels, fovs
 
 
-def split_dataset(images, labels, fovs, ratio=SPLIT_RATIO):
-    """按比例切分 train/val/test"""
+def split_dataset(images, labels, fovs, ratio=DEFAULT_SPLIT_RATIO):
     n = len(images)
     n_train = int(n * ratio[0])
-    n_val   = int(n * ratio[1])
-
-    return (images[:n_train],          labels[:n_train],          fovs[:n_train],
-            images[n_train:n_train+n_val], labels[n_train:n_train+n_val], fovs[n_train:n_train+n_val],
-            images[n_train+n_val:],    labels[n_train+n_val:],    fovs[n_train+n_val:])
+    n_val = int(n * ratio[1])
+    return (
+        images[:n_train], labels[:n_train], fovs[:n_train],
+        images[n_train:n_train + n_val], labels[n_train:n_train + n_val], fovs[n_train:n_train + n_val],
+        images[n_train + n_val:], labels[n_train + n_val:], fovs[n_train + n_val:],
+    )
 
 
 def print_stats(name, labels):
-    print(f'  {name:10s}: {len(labels):5d} 样本  '
-          f'θ ∈ [{labels.min():.2f}°, {labels.max():.2f}°]  '
-          f'均值={labels.mean():.2f}°  std={labels.std():.2f}°')
+    print(
+        f"  {name:10s}: {len(labels):5d} 样本  "
+        f"θ ∈ [{labels.min():.2f}°, {labels.max():.2f}°]  "
+        f"均值={labels.mean():.2f}°  std={labels.std():.2f}°"
+    )
 
 
-# ── 主程序 ────────────────────────────────────────────────
+def main():
+    args = parse_args()
+    logging.basicConfig(level=logging.INFO)
 
-if __name__ == '__main__':
-    print('=' * 60)
-    print('MoS₂ moiré CNN 数据集生成器')
-    print('=' * 60)
+    print("=" * 60)
+    print("MoS₂ moiré CNN 数据集生成器 v2（Tapping Mode + TITAN 70）")
+    print("=" * 60)
+    workers = args.workers
+    if workers is None:
+        env_w = os.environ.get("DATASET_NUM_WORKERS", "").strip()
+        if env_w.isdigit() and int(env_w) > 0:
+            workers = int(env_w)
+        else:
+            cpu = os.cpu_count() or 4
+            # 数据生成是纯 CPU 任务，留 2 个核给系统和 GPU 调度
+            workers = max(1, cpu - 2)
 
-    # 1. 生成
-    images, labels, fovs = generate_dataset(TOTAL_SAMPLES)
+    noise_range = (0.0, args.noise_max)
+    blur_range = (0.0, args.blur_max)
+    shear_x_range = (-args.shear_max / 3, args.shear_max / 3)
+    shear_y_range = (-args.shear_max, args.shear_max)
+    split_ratio = (args.train_ratio, args.val_ratio, 1 - args.train_ratio - args.val_ratio)
 
-    # 2. 切分
-    (img_train, lbl_train, fov_train,
-     img_val,   lbl_val,   fov_val,
-     img_test,  lbl_test,  fov_test) = split_dataset(images, labels, fovs)
+    print(f"配置:")
+    print(f"  样本数:      {args.samples}")
+    print(f"  图像尺寸:    {args.img_size}×{args.img_size}")
+    print(f"  通道数:      {args.channels} ({', '.join(CHANNEL_NAMES[:args.channels])})")
+    print(f"  θ 范围:      {args.theta_min}° ~ {args.theta_max}°")
+    print(f"  探针半径:    {args.tip_radius:.1f} nm")
+    print(f"  仿真分辨率:  {args.n_sim}×{args.n_sim}")
+    print(f"  θ 采样:      {'对数均匀' if args.log_theta else '线性均匀'}")
+    print(f"  并行 workers: {workers}")
+    print(f"  随机种子:    {args.seed}")
+    if args.no_progress:
+        _prog_desc = "关闭"
+    elif _stderr_is_tty() and tqdm is not None:
+        _prog_desc = "tqdm 进度条"
+    else:
+        _prog_desc = "文本行（约每 500 条）"
+    print(f"  进度显示:    {_prog_desc}")
+    print(f"  进程监控:    {'开启' if args.worker_monitor else '关闭'}")
 
-    print('\n数据集划分：')
-    print_stats('train', lbl_train)
-    print_stats('val',   lbl_val)
-    print_stats('test',  lbl_test)
+    tip_radius_range = (0.0, args.tip_radius)
 
-    # 3. 保存
-    save_path = os.path.join(DATA_DIR, 'moire_dataset.npz')
+    images, labels, fovs = generate_dataset(
+        n_total=args.samples,
+        seed=args.seed,
+        parallel_workers=workers,
+        img_size=args.img_size,
+        theta_min=args.theta_min,
+        theta_max=args.theta_max,
+        n_channels=args.channels,
+        tip_radius_nm=args.tip_radius,
+        tip_radius_range=tip_radius_range,
+        n_sim=args.n_sim,
+        log_theta=args.log_theta,
+        noise_range=noise_range,
+        blur_range=blur_range,
+        shear_x_range=shear_x_range,
+        shear_y_range=shear_y_range,
+        no_progress=args.no_progress,
+        worker_monitor=args.worker_monitor,
+        chunksize=args.chunksize,
+    )
+
+    (
+        img_train, lbl_train, fov_train,
+        img_val, lbl_val, fov_val,
+        img_test, lbl_test, fov_test,
+    ) = split_dataset(images, labels, fovs, ratio=split_ratio)
+
+    print("\n数据集划分：")
+    print_stats("train", lbl_train)
+    print_stats("val", lbl_val)
+    print_stats("test", lbl_test)
+
+    output_dir = args.output_dir or os.path.join(SCRIPT_DIR, "..", "data")
+    os.makedirs(output_dir, exist_ok=True)
+
+    save_path = os.path.join(output_dir, "moire_dataset.npz")
     np.savez_compressed(
         save_path,
         images_train=img_train, labels_train=lbl_train, fovs_train=fov_train,
-        images_val=img_val,     labels_val=lbl_val,     fovs_val=fov_val,
-        images_test=img_test,   labels_test=lbl_test,   fovs_test=fov_test,
+        images_val=img_val, labels_val=lbl_val, fovs_val=fov_val,
+        images_test=img_test, labels_test=lbl_test, fovs_test=fov_test,
+        config={
+            "n_samples": args.samples,
+            "img_size": args.img_size,
+            "n_channels": args.channels,
+            "channel_names": list(CHANNEL_NAMES[:args.channels]),
+            "theta_min": args.theta_min,
+            "theta_max": args.theta_max,
+            "tip_radius_nm": args.tip_radius,
+            "tip_radius_range": list(tip_radius_range),
+            "n_sim": args.n_sim,
+            "log_theta": args.log_theta,
+            "seed": args.seed,
+        },
     )
 
-    size_mb = os.path.getsize(save_path) / 1024**2
-    print(f'\n已保存: {save_path}')
-    print(f'文件大小: {size_mb:.1f} MB')
+    size_mb = os.path.getsize(save_path) / 1024 ** 2
+    print(f"\n已保存: {save_path}")
+    print(f"文件大小: {size_mb:.1f} MB")
+    print(f"images shape: {img_train.shape}")
 
-    # 4. 预览
-    try:
-        import matplotlib
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
+    if not args.no_preview:
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(2, 8, figsize=(20, 5))
-        fig.suptitle(r'MoS$_2$ 数据集样本预览（前8个 train 样本）', fontsize=12)
+            # suptitle 常不继承 rcParams 的 sans-serif；显式传入 CJK 字体文件
+            _fp = cjk_fontproperties()
 
-        for i in range(8):
-            axes[0, i].imshow(img_train[i], cmap='afmhot', vmin=0, vmax=1)
-            axes[0, i].set_title(f'θ={lbl_train[i]:.2f}°', fontsize=9)
-            axes[0, i].axis('off')
+            n_show = min(8, len(img_train))
+            n_ch = args.channels
+            fig, axes = plt.subplots(n_ch, n_show, figsize=(2.5 * n_show, 2.5 * n_ch))
+            if n_ch == 1:
+                axes = axes[np.newaxis, :]
+            ch_names = list(CHANNEL_NAMES[:n_ch])
+            # 化学式用 mathtext 下标，与 CJK 混排；不依赖字体是否含 U+2082
+            _title_zh = rf"$\mathrm{{MoS}}_2$ 数据集样本预览（{n_ch}ch）"
+            _title_en = rf"$\mathrm{{MoS}}_2$ dataset preview ({n_ch} ch)"
+            if _fp is not None:
+                fig.suptitle(_title_zh, fontsize=12, fontproperties=_fp)
+            else:
+                fig.suptitle(_title_en, fontsize=12)
 
-            axes[1, i].imshow(img_train[i + 8], cmap='afmhot', vmin=0, vmax=1)
-            axes[1, i].set_title(f'θ={lbl_train[i+8]:.2f}°', fontsize=9)
-            axes[1, i].axis('off')
+            for col in range(n_show):
+                for row, cname in enumerate(ch_names):
+                    if n_ch > 1:
+                        arr = img_train[col, row]
+                    else:
+                        arr = img_train[col]
+                    axes[row, col].imshow(arr, cmap="afmhot", vmin=0, vmax=1)
+                    if row == 0:
+                        _tkw: dict = {"fontsize": 9}
+                        if _fp is not None:
+                            _tkw["fontproperties"] = _fp
+                        axes[row, col].set_title(
+                            f"θ={lbl_train[col]:.2f}°",
+                            **_tkw,
+                        )
+                    if col == 0:
+                        axes[row, col].set_ylabel(cname, fontsize=9)
+                    axes[row, col].set_xticks([])
+                    axes[row, col].set_yticks([])
 
-        preview_path = os.path.join(DATA_DIR, 'dataset_preview.png')
-        plt.tight_layout()
-        plt.savefig(preview_path, dpi=120, bbox_inches='tight')
-        print(f'预览图: {preview_path}')
+            preview_path = os.path.join(output_dir, "dataset_preview.png")
+            plt.tight_layout()
+            plt.savefig(preview_path, dpi=120, bbox_inches="tight")
+            print(f"预览图: {preview_path}")
+        except ImportError as e:
+            logger.warning("预览图跳过（matplotlib 不可用）: %s", e)
+        except OSError as e:
+            logger.warning("预览图保存失败: %s", e)
 
-    except Exception as e:
-        print(f'预览图生成跳过: {e}')
+    print("\n下一步：python train_cnn.py")
 
-    print('\n下一步：python train_cnn.py')
+
+if __name__ == "__main__":
+    main()
