@@ -3,3 +3,18 @@ __pycache__/
 data/
 *.npz
 *.pt
+
+# Experiment artifacts
+angle_cnn/outputs/
+
+# LaTeX build artifacts
+thesis/hust_bachelor_cse/*.aux
+thesis/hust_bachelor_cse/*.bbl
+thesis/hust_bachelor_cse/*.blg
+thesis/hust_bachelor_cse/*.log
+thesis/hust_bachelor_cse/*.out
+thesis/hust_bachelor_cse/*.toc
+thesis/hust_bachelor_cse/*.pdf
+
+# OS/editor noise
+.DS_Store
