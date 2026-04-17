@@ -5,8 +5,8 @@
 \author{程远耀}
 \date{\today}
 \school{物理学院}
-\classnum{xxxxxxxx}          % 填写专业班级
-\stunum{xxxxxxxxxx}          % 填写学号
+\classnum{物理强基2201班}          % 填写专业班级
+\stunum{U202210214}          % 填写学号
 \instructor{张卜天}
 
 % ── 额外宏包 ──────────────────────────────────────────────
@@ -257,18 +257,18 @@ FFT 在两种条件下会显著失效：
     \midrule
     有效样本数 & 5000 & 5000 \\
     失败率 & $0.0\%$ & $0.0\%$ \\
-    MAE ($^{\circ}$) & $\bm{0.0315}$ & $0.0810$ \\
-    中位误差 ($^{\circ}$) & $0.0147$ & $0.0474$ \\
-    标准差 ($^{\circ}$) & $0.0435$ & $0.0879$ \\
-    90 百分位误差 ($^{\circ}$) & $0.0829$ & $0.2112$ \\
-    最大误差 ($^{\circ}$) & $0.3494$ & $0.5591$ \\
+    MAE ($^{\circ}$) & $\bm{0.0492}$ & $0.0940$ \\
+    中位误差 ($^{\circ}$) & $0.0281$ & $0.0761$ \\
+    标准差 ($^{\circ}$) & $0.0552$ & $0.0737$ \\
+    90 百分位误差 ($^{\circ}$) & $0.1264$ & $0.1992$ \\
+    最大误差 ($^{\circ}$) & $0.3340$ & $0.4427$ \\
     \midrule
-    MC Dropout 平均不确定度（CNN） & --- & $\pm 0.156^{\circ}$（示例） \\
+    MC Dropout 平均不确定度（CNN） & --- & $\pm 0.242^{\circ}$ \\
     \bottomrule
   \end{tabularx}
 \end{generaltab}
 
-在该公平设定下，FFT 的平均误差低于 CNN；CNN 仍可提供不确定性估计，并在仅允许小图输入或畸变 sweep 等场景具有补充价值，真实 AFM 数据上的优劣需待实验后结论。
+在该公平设定下，FFT 的平均误差低于 CNN。这里需要强调：FFT 在当前评测口径（高分辨率重算）下误差更低，CNN 的优势主要体现在小图输入、复杂退化条件下的鲁棒性以及不确定性输出能力。真实 AFM 数据上的最终优劣仍需后续实验闭环验证。
 
 \begin{generalfig}[htbp]{数据集多通道样本预览（示例文件 \texttt{dataset\_preview.png}）}{fig:dataset_preview}
   \IfFileExists{../../data/dataset_preview.png}{%
@@ -329,6 +329,27 @@ FFT 在两种条件下会显著失效：
 
 （本节待 AFM 测试完成后补充实验图像及分析结果。）
 
+\subsection{扫描探针实证参照}
+
+为避免本文仅停留于仿真，本工作将已有扫描探针文献作为外部实证参照。Liao 等在大面积 MoS$_2$ 同质结构工作中给出了 AFM 形貌图（见原文 Fig.~2），用于验证样品表面与界面质量\cite{liao2020precise}，说明 MoS$_2$ 扭转体系具备 AFM 形貌表征的实验可行性。McGilly 等采用压电响应力显微镜（PFM，AFM 家族模式）直接可视化了 moiré 超晶格的实空间网络\cite{mcgilly2020visualization}。Engelke 等提出扭转力显微（TFM）并实现了 van der Waals moiré 与原子晶格成像\cite{engelke2024torsional}。
+
+\begin{generalfig}[htbp]{文献实证图像示例 I：Nano Lett. 2023（STM）中不同扭角下的 moiré 纹理与频域峰，展示了与本文 FFT 管线一致的“实空间周期 + 频域峰”信息}{fig:lit_stm_moire_fft}
+  \IfFileExists{../../angle_cnn/docs/figures/literature/pmc10603799/nanolett2023_fig1_stm_fft.jpg}{%
+    \includegraphics[width=\textwidth]{../../angle_cnn/docs/figures/literature/pmc10603799/nanolett2023_fig1_stm_fft.jpg}}{%
+    \fbox{\parbox{\textwidth}{\centering\vspace{2cm}缺少文献图像文件：\texttt{nanolett2023\_fig1\_stm\_fft.jpg}\vspace{2cm}}}}
+\end{generalfig}
+
+\begin{generalfig}[htbp]{文献实证图像示例 II：Nat. Commun. 2020（AFM）中 MoS$_2$ 扭转样品形貌（Fig.~2），可作为本文 AFM 可行性的直接实验先例}{fig:lit_afm_liao}
+  \IfFileExists{../../angle_cnn/docs/figures/literature/pmc7195481/liao2020_fig2_afm.jpg}{%
+    \includegraphics[width=\textwidth]{../../angle_cnn/docs/figures/literature/pmc7195481/liao2020_fig2_afm.jpg}}{%
+    \fbox{\parbox{\textwidth}{\centering\vspace{2cm}缺少文献图像文件：\texttt{liao2020\_fig2\_afm.jpg}\vspace{2cm}}}}
+\end{generalfig}
+
+上述图像用于“可观测性与方法可行性”论证，而非作为本文自采样品结果。与 STM 相比，AFM 在原子/电子态细节上的对比度通常较弱，但在 moiré 周期、域结构趋势与频域峰可辨性层面仍可提供与本文算法目标一致的关键信息。
+
+需要说明的是，上述文献与本文任务并非完全同构：本文聚焦于 Tapping 模式下 Height / Phase / Amplitude 通道的转角提取 pipeline。当前阶段属于“仿真与算法先行”，后续将以真实 AFM 数据完成迁移验证，并与 SHG 转角定标进行交叉比对。
+为便于复现实证对照，项目中已整理文献图像索引与答辩说明（见 \texttt{angle\_cnn/docs/literature\_image\_benchmark.md}）。
+
 \subsection{SHG 转角精确定标}
 
 计划使用华中科技大学强磁场中心光学二次谐波（SHG）系统进行转角精确定标。MoS$_2$ 的 $C_{3v}$ 对称性使其 SHG 强度随入射偏振角 $\varphi$ 呈六瓣图案：
@@ -358,7 +379,7 @@ FFT 在两种条件下会显著失效：
 
 (2) 提出了连续晶格重构模型（strength 线性插值），消除了传统分段函数在 $\theta = 2^{\circ}$ 处的人工不连续性，与 Weston et al. 等实验观测的连续重构过渡物理图景相符\cite{weston2020atomic}。
 
-(3) 构建了面向轻敲模式多通道、含探针卷积与多种电学/力学退化的仿真数据集，并采用改造 ResNet + Huber/Mixup 等策略训练 CNN；在公平对比（CNN 用 $128^2$、FFT 用 $512^2$ 重算）下，当前典型结果为 FFT MAE 约 $0.032^{\circ}$、CNN MAE 约 $0.08^{\circ}$，即该设定下 FFT 平均误差更低；CNN 仍可给出 MC Dropout 不确定性，并在畸变扫描等补充实验中与 FFT 形成对照。
+(3) 构建了面向轻敲模式多通道、含探针卷积与多种电学/力学退化的仿真数据集，并采用改造 ResNet + Huber/Mixup 等策略训练 CNN；在公平对比（CNN 用 $128^2$、FFT 用 $512^2$ 重算）下，本次全量评测结果为 FFT MAE 约 $0.049^{\circ}$、CNN MAE 约 $0.094^{\circ}$，即该设定下 FFT 平均误差更低；CNN 仍可给出 MC Dropout 不确定性（平均约 $\pm 0.242^{\circ}$），并在畸变扫描等补充实验中与 FFT 形成互补。
 
 (4) Distortion sweep 等实验用于刻画不同畸变强度下的相对表现，不能简单等同于表~\ref{tab:final_stats} 的全局 MAE；真实 AFM 数据上的优劣有待后续实验验证。
 
@@ -373,6 +394,13 @@ FFT 在两种条件下会显著失效：
 (3) 引入 pixel\_size 作为附加输入：当前 CNN 输入只有图像，后续可将 nm/pixel 作为额外通道输入，提升对不同扫描参数的泛化能力。
 
 (4) 模型可解释性：通过 Grad-CAM 可视化分析 CNN 提取转角时关注的图像区域，验证模型的物理合理性。
+
+(5) 融合估计与质量标签：为兼顾 FFT 的可解释高精度与 CNN 的鲁棒性/不确定性，后续将采用基于不确定性的动态融合
+\begin{equation}
+  \theta_{\mathrm{final}} = w(\sigma_{\mathrm{cnn}})\,\theta_{\mathrm{fft}}
+  + \bigl(1-w(\sigma_{\mathrm{cnn}})\bigr)\,\theta_{\mathrm{cnn}},
+\end{equation}
+其中 $\sigma_{\mathrm{cnn}}$ 为 CNN 预测不确定度，且不确定度越大时 $w$ 越大（更偏向 FFT）。系统输出除角度估计外，还将同时给出置信区间与数据质量标签（可用/需复扫），以更好匹配实验室实际流程。
 
 % ══════════════════════════════════════════════════════════
 % 参考文献
@@ -448,17 +476,17 @@ MoS₂ moiré：FFT vs CNN 角度提取公平对比报告
 ----------------------------------------------
 有效样本数                        5000         5000
 失败率                          0.0%         0.0%
-MAE (°)                    0.0315       0.0810
-中位误差 (°)                   0.0147       0.0474
-std (°)                    0.0435       0.0879
-90th pct (°)               0.0829       0.2112
-最大误差 (°)                   0.3494       0.5591
+MAE (°)                    0.0492       0.0940
+中位误差 (°)                   0.0281       0.0761
+std (°)                    0.0552       0.0737
+90th pct (°)               0.1264       0.1992
+最大误差 (°)                   0.3340       0.4427
 
-CNN 比 FFT 精度提升：0.4 倍
+CNN 比 FFT 精度提升：0.5 倍
 （注：该比值定义为 MAE_FFT/MAE_CNN；公平口径下 FFT 更优时小于 1。）
 
 MC Dropout 不确定性:
-  平均不确定性: ±0.1562°
+  平均不确定性: ±0.242°
 \end{verbatim}
 
 \end{appendices}

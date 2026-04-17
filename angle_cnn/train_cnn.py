@@ -77,6 +77,8 @@ from core.cnn import (  # noqa: E402
 )
 from core.io_utils import load_model_checkpoint, load_npz_dataset, state_dict_from_checkpoint  # noqa: E402
 from core.seed import set_global_seed, worker_init_fn  # noqa: E402
+from core.augment import get_default_augmentation  # noqa: E402
+from core.metrics import compute_stratified_metrics, generate_evaluation_report  # noqa: E402
 
 # ── 默认超参数 ─────────────────────────────────────────────
 DEFAULT_BATCH_SIZE = 512   # RTX 5070 Ti 16 GB：128×128×3 图像轻松跑 512+
@@ -330,6 +332,24 @@ def evaluate(model, loader, criterion, device, use_amp=False,
             it.set_postfix(loss=f"{loss.item():.4f}", refresh=False)
     n = len(loader.dataset)
     return total_loss / n, total_mae / n
+
+
+@torch.no_grad()
+def predict_testset(model, loader, device, use_amp=False, amp_dtype=torch.float16, add_fft_channel: bool = False):
+    """Collect full test predictions/labels in degree for post-hoc reports."""
+    model.eval()
+    all_preds, all_labels = [], []
+    for imgs, lbls in loader:
+        imgs = imgs.to(device, non_blocking=True)
+        if add_fft_channel:
+            imgs = compute_fft_channel(imgs)
+        with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
+            preds = model(imgs).float().squeeze(1).clamp(0, 1)
+        preds_deg = (preds * (THETA_MAX - THETA_MIN) + THETA_MIN).cpu().numpy()
+        lbls_deg = (lbls * (THETA_MAX - THETA_MIN) + THETA_MIN).cpu().numpy()
+        all_preds.append(preds_deg)
+        all_labels.append(lbls_deg)
+    return np.concatenate(all_preds), np.concatenate(all_labels)
 
 
 def save_log_plot(train_losses, val_losses, val_maes, log_png_path):
@@ -687,6 +707,70 @@ def main():
         print(f"  MC MAE:       {mc_mae:.4f}°")
         print(f"  平均不确定性: ±{mean_unc:.4f}°")
         print(f"  不确定性范围: [{all_stds.min():.4f}°, {all_stds.max():.4f}°]")
+
+    # ── 分层评估与校准报告（测试集）──
+    print("\n生成分层评估报告...")
+    if args.mc_samples > 0:
+        report_preds = all_means
+        report_labels = all_labels
+        report_uncs = all_stds
+    else:
+        report_preds, report_labels = predict_testset(
+            model, test_loader, device, use_amp=use_amp, amp_dtype=amp_dtype, add_fft_channel=add_fft
+        )
+        report_uncs = None
+
+    report = generate_evaluation_report(
+        report_preds,
+        report_labels,
+        output_dir=out_dir,
+        method_name="CNN",
+        uncertainties=report_uncs,
+        theta_min=THETA_MIN,
+        theta_max=THETA_MAX,
+    )
+    print(
+        "  分层指标: "
+        f"P95={report.get('p95', float('nan')):.4f}°, "
+        f"small<1.5° MAE={report.get('small_angle_mae', float('nan')):.4f}°, "
+        f"large>3.5° MAE={report.get('large_angle_mae', float('nan')):.4f}°"
+    )
+
+    # ── 论文表格友好：单行 CSV 摘要 ──
+    summary_csv = os.path.join(out_dir, "train_test_summary.csv")
+    summary_row = {
+        "n_samples": int(len(report_labels)),
+        "model_arch": args.arch,
+        "n_channels": int(n_ch),
+        "add_fft_channel": bool(add_fft),
+        "test_mae_deg": float(test_mae),
+        "test_loss": float(test_loss),
+        "p95_deg": float(report.get("p95", np.nan)),
+        "p99_deg": float(report.get("p99", np.nan)),
+        "small_lt1p5_mae_deg": float(report.get("small_angle_mae", np.nan)),
+        "large_gt3p5_mae_deg": float(report.get("large_angle_mae", np.nan)),
+    }
+    if args.mc_samples > 0:
+        summary_row.update({
+            "mc_samples": int(args.mc_samples),
+            "mc_mae_deg": float(mc_mae),
+            "mean_unc_deg": float(mean_unc),
+        })
+        cal = report.get("calibration", {})
+        if isinstance(cal, dict):
+            summary_row.update({
+                "within_1sigma_pct": float(cal.get("within_1sigma_pct", np.nan)),
+                "within_2sigma_pct": float(cal.get("within_2sigma_pct", np.nan)),
+                "within_3sigma_pct": float(cal.get("within_3sigma_pct", np.nan)),
+                "error_unc_corr": float(cal.get("error_uncertainty_correlation", np.nan)),
+                "calibration_mse": float(cal.get("calibration_mse", np.nan)),
+            })
+
+    with open(summary_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(summary_row.keys()))
+        writer.writeheader()
+        writer.writerow(summary_row)
+    print(f"  测试摘要CSV: {summary_csv}")
 
     if train_losses:
         save_log_plot(train_losses, val_losses, val_maes, log_png)

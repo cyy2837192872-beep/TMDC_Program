@@ -19,3 +19,6 @@ thesis/hust_bachelor_cse/STZhongsong.ttf
 
 # OS/editor noise
 .DS_Store
+
+# Python packaging
+*.egg-info/

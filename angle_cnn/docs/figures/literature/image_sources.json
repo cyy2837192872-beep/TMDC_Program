@@ -1,0 +1,42 @@
+[
+  {
+    "label": "Nano Lett. 2023 Figure 1",
+    "url": "https://cdn.ncbi.nlm.nih.gov/pmc/blobs/64a5/10603799/ebe8b3c131bc/nl3c02804_0001.jpg",
+    "out": "/home/cyy2837192872/tmdc-project/angle_cnn/docs/figures/literature/pmc10603799/nanolett2023_fig1_stm_fft.jpg",
+    "status_code": 200,
+    "bytes": 161803,
+    "saved": true
+  },
+  {
+    "label": "Nano Lett. 2023 Figure 3",
+    "url": "https://cdn.ncbi.nlm.nih.gov/pmc/blobs/64a5/10603799/a7c7648bcc83/nl3c02804_0003.jpg",
+    "out": "/home/cyy2837192872/tmdc-project/angle_cnn/docs/figures/literature/pmc10603799/nanolett2023_fig3_spatial_modulation.jpg",
+    "status_code": 200,
+    "bytes": 365303,
+    "saved": true
+  },
+  {
+    "label": "Nano Lett. 2023 Figure 2",
+    "url": "https://cdn.ncbi.nlm.nih.gov/pmc/blobs/64a5/10603799/8134f3a75d9f/nl3c02804_0002.jpg",
+    "out": "/home/cyy2837192872/tmdc-project/angle_cnn/docs/figures/literature/pmc10603799/nanolett2023_fig2_spectra.jpg",
+    "status_code": 200,
+    "bytes": 68469,
+    "saved": true
+  },
+  {
+    "label": "Nano Lett. 2023 Figure 4",
+    "url": "https://cdn.ncbi.nlm.nih.gov/pmc/blobs/64a5/10603799/2825a86a7211/nl3c02804_0004.jpg",
+    "out": "/home/cyy2837192872/tmdc-project/angle_cnn/docs/figures/literature/pmc10603799/nanolett2023_fig4_linecut.jpg",
+    "status_code": 200,
+    "bytes": 108894,
+    "saved": true
+  },
+  {
+    "label": "Nat. Commun. 2020 Figure 2 (includes AFM panel)",
+    "url": "https://cdn.ncbi.nlm.nih.gov/pmc/blobs/632e/7195481/7dd69811342c/41467_2020_16056_Fig2_HTML.jpg",
+    "out": "/home/cyy2837192872/tmdc-project/angle_cnn/docs/figures/literature/pmc7195481/liao2020_fig2_afm.jpg",
+    "status_code": 200,
+    "bytes": 178623,
+    "saved": true
+  }
+]

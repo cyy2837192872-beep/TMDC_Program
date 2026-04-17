@@ -252,6 +252,99 @@ def generate_sample(
     return np.stack(crops, axis=0), fov_nm
 
 
+def generate_sample_paired_cnn_fft(
+    theta_deg: float,
+    rng: np.random.Generator,
+    img_size: int,
+    fixed_fov_nm: float,
+    n_channels: int = 1,
+    tip_radius_nm: float = 0.0,
+    tip_radius_range: Tuple[float, float] | None = None,
+    n_sim: int = 512,
+    noise_range: Tuple[float, float] = DEFAULT_NOISE_RANGE,
+    blur_range: Tuple[float, float] = DEFAULT_BLUR_RANGE,
+    scale_range: Tuple[float, float] = DEFAULT_SCALE_RANGE,
+    shear_x_range: Tuple[float, float] = DEFAULT_SHEAR_X_RANGE,
+    shear_y_range: Tuple[float, float] = DEFAULT_SHEAR_Y_RANGE,
+    tilt_amp_range: Tuple[float, float] = DEFAULT_TILT_AMP_RANGE,
+    row_noise_range: Tuple[float, float] = DEFAULT_ROW_NOISE_RANGE,
+    oneoverf_range: Tuple[float, float] = DEFAULT_ONEOVERF_RANGE,
+    ringing_range: Tuple[float, float] = DEFAULT_RINGING_RANGE,
+    scan_offset_range: Tuple[float, float] = DEFAULT_SCAN_OFFSET_RANGE,
+) -> Tuple[np.ndarray, np.ndarray, float, float]:
+    """同一场景配对：与训练一致的退化后，CNN 取中心裁剪，FFT 用整幅 height。
+
+    解决 eval_compare 中「CNN 用数据集图像、FFT 另起炉灶重算」导致的分布不一致。
+    返回
+    ----
+    img_cnn : (H,W) 或 (C,H,W)，与 ``generate_sample`` 相同布局
+    height_512 : (512, 512) 归一化后的 height，供 FFT
+    fov_nm : float
+    actual_ppp : float  供 ``extract_angle_fft`` 的 ppp 下界（仍依赖真值 θ；见评测说明）
+    """
+    requested = CHANNEL_NAMES[:n_channels]
+
+    if n_channels > 1:
+        ch_dict, fov_nm = synthesize_multichannel_moire(
+            theta_deg, fixed_fov_nm, n=n_sim, channels=requested,
+        )
+    else:
+        raw, fov_nm = synthesize_reconstructed_moire(theta_deg, fixed_fov_nm, n=n_sim)
+        ch_dict = {"height": raw}
+
+    ch_dict = {k: v.astype(np.float32, copy=False) for k, v in ch_dict.items()}
+    pixel_size_nm = fov_nm / n_sim
+
+    actual_tip_r = rng.uniform(*tip_radius_range) if tip_radius_range is not None else tip_radius_nm
+
+    shear_x = rng.uniform(*shear_x_range)
+    shear_y = rng.uniform(*shear_y_range)
+    scale_x = rng.uniform(*scale_range)
+    scale_y = rng.uniform(*scale_range)
+    tilt_amp = rng.uniform(*tilt_amp_range)
+    tilt_ax = rng.uniform(-1.0, 1.0)
+    tilt_ay = rng.uniform(-1.0, 1.0)
+
+    ch_dict = apply_multichannel_degradation(
+        ch_dict, rng,
+        tip_radius_nm=actual_tip_r,
+        pixel_size_nm=pixel_size_nm,
+        noise_amp=rng.uniform(*noise_range),
+        blur_sigma=rng.uniform(*blur_range),
+        oneoverf_amp=rng.uniform(*oneoverf_range),
+        oneoverf_alpha=rng.uniform(0.8, 1.5),
+        row_noise_amp=rng.uniform(*row_noise_range),
+        ringing_amp=rng.uniform(*ringing_range),
+        scan_offset_amp=rng.uniform(*scan_offset_range),
+        tilt_amp=tilt_amp, tilt_ax=tilt_ax, tilt_ay=tilt_ay,
+        shear_x=shear_x, shear_y=shear_y,
+        scale_x=scale_x, scale_y=scale_y,
+    )
+
+    actual_ppp = max(4.0, fixed_fov_nm / moire_period(theta_deg))
+
+    crops: list[np.ndarray] = []
+    for name in requested:
+        arr = ch_dict[name]
+        arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-9)
+        n = arr.shape[0]
+        if n > img_size:
+            oy = (n - img_size) // 2
+            ox = (n - img_size) // 2
+            arr = arr[oy: oy + img_size, ox: ox + img_size]
+        crops.append(arr.astype(np.float32))
+
+    h = ch_dict["height"]
+    h_norm = (h - h.min()) / (h.max() - h.min() + 1e-9)
+
+    if n_channels == 1:
+        img_cnn = crops[0]
+    else:
+        img_cnn = np.stack(crops, axis=0)
+
+    return img_cnn, h_norm.astype(np.float32), fov_nm, float(actual_ppp)
+
+
 def _subseed(master: int, index: int) -> int:
     return int((master * 2654435761 + index * 104729) % (2**32 - 1))
 
