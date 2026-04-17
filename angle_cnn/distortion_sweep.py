@@ -34,7 +34,7 @@ from core.degrade import apply_affine_distortion, apply_tip_convolution  # noqa:
 from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
 from core.io_utils import require_file  # noqa: E402
 from core.config import IMG_SIZE  # noqa: E402
-from core.physics import moire_period, FIXED_FOV_NM  # noqa: E402
+from core.physics import FIXED_FOV_NM, pixels_per_moire_period  # noqa: E402
 from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
 from core.eval_utils import load_model_from_checkpoint, cnn_predict_single  # noqa: E402
 from moire_pipeline import extract_angle_fft  # noqa: E402
@@ -80,7 +80,7 @@ def make_image(theta_deg, shear, seed, n_channels=1):
         raw, fov_nm = synthesize_reconstructed_moire(theta_deg, FIXED_FOV_NM, n=512)
         ch_dict = {"height": raw}
 
-    actual_ppp = max(4.0, FIXED_FOV_NM / moire_period(theta_deg))
+    actual_ppp = pixels_per_moire_period(512, theta_deg, FIXED_FOV_NM)
     pixel_size_nm = fov_nm / 512
 
     sx = rng.uniform(-shear, shear) if shear > 0 else 0.0

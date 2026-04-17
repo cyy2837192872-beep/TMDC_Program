@@ -68,7 +68,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from core.config import A_NM, DEFAULT_PPP, IMG_SIZE, SIM_SIZE, THETA_MIN, THETA_MAX  # noqa: E402
-from core.physics import moire_period  # noqa: E402
+from core.physics import moire_period, pixels_per_moire_period  # noqa: E402
 from core.fonts import cjk_fontproperties  # noqa: E402
 from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
 from core.degrade import (  # noqa: E402
@@ -318,7 +318,7 @@ def generate_sample_paired_cnn_fft(
         scale_x=scale_x, scale_y=scale_y,
     )
 
-    actual_ppp = max(4.0, fixed_fov_nm / moire_period(theta_deg))
+    actual_ppp = pixels_per_moire_period(n_sim, theta_deg, fixed_fov_nm)
 
     crops: list[np.ndarray] = []
     for name in requested:

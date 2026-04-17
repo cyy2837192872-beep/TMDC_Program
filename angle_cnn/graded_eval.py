@@ -48,7 +48,7 @@ from core.degrade import (  # noqa: E402
 from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
 from core.io_utils import require_file  # noqa: E402
 from core.config import IMG_SIZE, THETA_MIN, THETA_MAX  # noqa: E402
-from core.physics import A_NM, angle_uncertainty, moire_period, FIXED_FOV_NM  # noqa: E402
+from core.physics import A_NM, angle_uncertainty, FIXED_FOV_NM, pixels_per_moire_period  # noqa: E402
 from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
 from moire_pipeline import extract_angle_fft  # noqa: E402
 from core.cnn import predict_with_uncertainty  # noqa: E402
@@ -99,7 +99,7 @@ def generate_test_image(
         raw, fov_nm = synthesize_reconstructed_moire(theta_deg, FIXED_FOV_NM, n=512)
         ch_dict = {"height": raw}
 
-    actual_ppp = max(4.0, FIXED_FOV_NM / moire_period(theta_deg))
+    actual_ppp = pixels_per_moire_period(512, theta_deg, FIXED_FOV_NM)
     pixel_size_nm = fov_nm / 512
 
     # Apply degradations to all channels

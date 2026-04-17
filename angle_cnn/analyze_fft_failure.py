@@ -27,7 +27,13 @@ from core.degrade import apply_affine_distortion, apply_background_tilt, apply_r
 from core.fonts import setup_matplotlib_cjk_font
 from core.io_utils import load_npz_dataset, require_file
 from core.config import THETA_MIN, THETA_MAX  # noqa: E402
-from core.physics import A_NM, angle_uncertainty, moire_period, FIXED_FOV_NM  # noqa: E402
+from core.physics import (  # noqa: E402
+    A_NM,
+    angle_uncertainty,
+    moire_period,
+    FIXED_FOV_NM,
+    pixels_per_moire_period,
+)
 from core.moire_sim import synthesize_reconstructed_moire
 from moire_pipeline import extract_angle_fft
 from core.cnn import build_model
@@ -74,16 +80,16 @@ def analyze_fft_on_test_set():
     print(f"  真实角度: {label:.2f}°")
     print(f"  记录的视野(fov): {fov:.1f} nm")
     
-    # eval_compare.py 中的计算方式
+    # eval_compare.py：ppp = n·L/fov（每莫尔周期像素数）；裁剪后 fov 与 n 同比缩放时 ppp 不变
     fov_actual = fov * scale
-    ppp_512 = max(4.0, FIXED_FOV_NM / moire_period(label))
-    actual_ppp = ppp_512 * scale
-    
+    actual_ppp = pixels_per_moire_period(img_px, label, fov_actual)
+    ppp_512 = pixels_per_moire_period(512, label, FIXED_FOV_NM)
+
     print(f"\n  eval_compare.py 计算方式：")
     print(f"    scale = {img_px} / 512 = {scale:.4f}")
     print(f"    fov_actual = {fov} × {scale} = {fov_actual:.1f} nm")
-    print(f"    ppp_512 = {ppp_512:.1f}")
-    print(f"    actual_ppp = {ppp_512:.1f} × {scale} = {actual_ppp:.2f}")
+    print(f"    ppp(512,θ) = {ppp_512:.1f} px/周期（参考）")
+    print(f"    ppp(本图) = {actual_ppp:.2f} px/周期")
     
     # FFT峰位置
     r_peak = img_px / actual_ppp
@@ -143,7 +149,7 @@ def compare_image_sizes():
             img_128 = img_512[oy:oy+128, ox:ox+128]
             
             # FFT on 512×512
-            actual_ppp_512 = max(4.0, FIXED_FOV_NM / moire_period(theta))
+            actual_ppp_512 = pixels_per_moire_period(512, theta, FIXED_FOV_NM)
             th_512, _, _ = extract_angle_fft(img_512, fov_nm=fov_nm, ppp=actual_ppp_512)
             if th_512 is not None:
                 results[theta]["512"].append(abs(th_512 - theta))
@@ -151,7 +157,7 @@ def compare_image_sizes():
             # FFT on 128×128 (eval_compare方式)
             scale = 128 / 512
             fov_128 = fov_nm * scale
-            actual_ppp_128 = actual_ppp_512 * scale
+            actual_ppp_128 = pixels_per_moire_period(128, theta, fov_128)
             th_128, _, _ = extract_angle_fft(img_128, fov_nm=fov_128, ppp=actual_ppp_128)
             if th_128 is not None:
                 results[theta]["128"].append(abs(th_128 - theta))
@@ -191,12 +197,8 @@ def analyze_ppp_effect():
     print("  " + "-" * 55)
     
     for n_img in [512, 256, 128, 64]:
-        # 计算ppp和r_peak
-        ppp_values = []
-        if n_img == 512:
-            ppp = FIXED_FOV_NM / L
-        else:
-            ppp = (n_img / 512) * (FIXED_FOV_NM / L)
+        # 同一物理视野 FIXED_FOV_NM 下，不同栅格分辨率：ppp = n·L/fov
+        ppp = pixels_per_moire_period(n_img, theta, FIXED_FOV_NM)
         
         r_peak = n_img / ppp
         r_min = max(2.0, 0.4 * r_peak)
@@ -235,12 +237,12 @@ def visualize_fft_comparison():
     img_128 = img_512[oy:oy+128, ox:ox+128]
     
     # FFT
-    actual_ppp_512 = max(4.0, FIXED_FOV_NM / moire_period(theta))
+    actual_ppp_512 = pixels_per_moire_period(512, theta, FIXED_FOV_NM)
     th_512, unc_512, info_512 = extract_angle_fft(img_512, fov_nm=fov_nm, ppp=actual_ppp_512)
     
     scale = 128 / 512
     fov_128 = fov_nm * scale
-    actual_ppp_128 = actual_ppp_512 * scale
+    actual_ppp_128 = pixels_per_moire_period(128, theta, fov_128)
     th_128, unc_128, info_128 = extract_angle_fft(img_128, fov_nm=fov_128, ppp=actual_ppp_128)
     
     # 绘图

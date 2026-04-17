@@ -33,11 +33,17 @@ def _compute_moire_fields(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
     """Core computation shared by single- and multi-channel synthesis.
 
+    ``fixed_fov_nm`` is the physical scan width/height (nm): coordinates run
+    ``[0, fov_nm)`` so that moiré period L(θ) implies ~``fov_nm / L`` periods
+    across the image — **independent of θ** when ``fixed_fov_nm`` is constant.
+
     Returns (psi, R_sharp, Phi_recon, domain_sign, strength, fov_nm).
     """
-    actual_ppp = max(4.0, fixed_fov_nm / moire_period(theta_deg, a_nm))
     L_nm = moire_period(theta_deg, a_nm)
-    fov_nm = n * (L_nm / actual_ppp)
+    # Physical extent must match the caller's intent (dataset: FIXED_FOV_NM).
+    # Older versions incorrectly set fov_nm = n·L²/fixed_fov, which shrank the
+    # moiré period in pixel space as θ→0 and made patterns look artificially dense.
+    fov_nm = float(fixed_fov_nm)
 
     theta_rad = np.radians(theta_deg)
     q = 2.0 * np.pi / L_nm

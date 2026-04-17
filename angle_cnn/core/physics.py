@@ -41,3 +41,15 @@ def angle_uncertainty(fov_nm: float, a_nm: float = A_NM) -> float:
 
 # Default FOV: 10 moiré periods at minimum angle
 FIXED_FOV_NM: float = 10.0 * moire_period(THETA_MIN)
+
+
+def pixels_per_moire_period(
+    n_pixels: int, theta_deg: float, fov_nm: float, a_nm: float = A_NM
+) -> float:
+    """Pixels spanning one moiré period for an n×n raster over ``fov_nm`` (nm).
+
+    Used as ``ppp`` in ``extract_angle_fft`` (``r_peak = n_img / ppp``).
+    Enforces a small floor to avoid aliasing when angles are large (tiny L).
+    """
+    L = moire_period(theta_deg, a_nm)
+    return float(max(4.0, n_pixels * L / fov_nm))

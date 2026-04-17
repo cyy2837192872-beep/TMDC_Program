@@ -82,7 +82,7 @@ from dataset_generator import (  # noqa: E402
     generate_sample_paired_cnn_fft,
 )
 from core.config import THETA_MIN, THETA_MAX  # noqa: E402
-from core.physics import A_NM, moire_period, FIXED_FOV_NM  # noqa: E402
+from core.physics import A_NM, FIXED_FOV_NM, pixels_per_moire_period  # noqa: E402
 from moire_pipeline import extract_angle_fft  # noqa: E402
 from core.cnn import (  # noqa: E402
     build_model,
@@ -119,7 +119,7 @@ def _generate_fft_image_512(
     """
     raw, fov_nm = synthesize_reconstructed_moire(theta_deg, FIXED_FOV_NM, n=512)
     pixel_size_nm = fov_nm / 512
-    actual_ppp = max(4.0, FIXED_FOV_NM / moire_period(theta_deg))
+    actual_ppp = pixels_per_moire_period(512, theta_deg, FIXED_FOV_NM)
 
     img = raw.copy()
 
