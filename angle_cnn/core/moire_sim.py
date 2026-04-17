@@ -7,18 +7,13 @@ Supports single-channel (height only, legacy) and multi-channel output
 
 from __future__ import annotations
 
-import os
-import sys
 from typing import Dict, Tuple
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-_SCRIPT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPT_DIR)
-
-from moire_pipeline import A_NM, moire_period  # noqa: E402
+from .config import A_NM, SIM_SIZE
+from .physics import moire_period
 
 _X_LINSPACE_CACHE: Dict[Tuple[int, int], np.ndarray] = {}
 

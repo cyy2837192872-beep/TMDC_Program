@@ -25,10 +25,13 @@ if SCRIPT_DIR not in sys.path:
 
 from core.degrade import apply_affine_distortion, apply_background_tilt, apply_row_noise
 from core.fonts import setup_matplotlib_cjk_font
-from core.io_utils import load_model_checkpoint, load_npz_dataset, require_file, state_dict_from_checkpoint
+from core.io_utils import load_npz_dataset, require_file
+from core.config import THETA_MIN, THETA_MAX  # noqa: E402
+from core.physics import A_NM, angle_uncertainty, moire_period, FIXED_FOV_NM  # noqa: E402
 from core.moire_sim import synthesize_reconstructed_moire
-from moire_pipeline import extract_angle_fft, moire_period, angle_uncertainty, A_NM
-from train_cnn import THETA_MAX, THETA_MIN, build_model
+from moire_pipeline import extract_angle_fft
+from core.cnn import build_model
+from core.eval_utils import load_model_from_checkpoint
 
 setup_matplotlib_cjk_font()
 
@@ -36,9 +39,6 @@ import matplotlib.pyplot as plt
 
 OUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 os.makedirs(OUT_DIR, exist_ok=True)
-
-# 固定视野
-FIXED_FOV_NM = 10 * moire_period(THETA_MIN)
 
 
 def analyze_fft_on_test_set():

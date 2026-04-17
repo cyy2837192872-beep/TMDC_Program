@@ -46,10 +46,13 @@ from core.degrade import (  # noqa: E402
     apply_tip_convolution,
 )
 from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
-from core.io_utils import load_model_checkpoint, require_file, state_dict_from_checkpoint  # noqa: E402
+from core.io_utils import require_file  # noqa: E402
+from core.config import IMG_SIZE, THETA_MIN, THETA_MAX  # noqa: E402
+from core.physics import A_NM, angle_uncertainty, moire_period, FIXED_FOV_NM  # noqa: E402
 from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
-from moire_pipeline import A_NM, angle_uncertainty, extract_angle_fft, moire_period  # noqa: E402
-from core.cnn import THETA_MAX, THETA_MIN, build_model, compute_fft_channel, predict_with_uncertainty  # noqa: E402
+from moire_pipeline import extract_angle_fft  # noqa: E402
+from core.cnn import predict_with_uncertainty  # noqa: E402
+from core.eval_utils import load_model_from_checkpoint, cnn_predict_single  # noqa: E402
 
 setup_matplotlib_cjk_font()
 
@@ -57,9 +60,6 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 OUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 os.makedirs(OUT_DIR, exist_ok=True)
-
-FIXED_FOV_NM = 10 * moire_period(THETA_MIN)
-IMG_SIZE = 128
 
 TEST_THETAS = [0.5, 1.0, 2.0, 3.0, 5.0]
 N_TRIALS = 20
@@ -154,18 +154,6 @@ def generate_test_image(
         img_cnn = ch_dict["height"][oy:oy + IMG_SIZE, ox:ox + IMG_SIZE]
 
     return img_cnn, img_512_height, fov_nm, actual_ppp
-
-
-def cnn_predict_single(model, img_cnn, device, add_fft_channel=False):
-    if img_cnn.ndim == 2:
-        x = torch.from_numpy(img_cnn).unsqueeze(0).unsqueeze(0).float().to(device)
-    else:
-        x = torch.from_numpy(img_cnn).unsqueeze(0).float().to(device)
-    if add_fft_channel:
-        x = compute_fft_channel(x)
-    with torch.no_grad():
-        pred_norm = max(0.0, min(1.0, model(x).item()))
-    return pred_norm * (THETA_MAX - THETA_MIN) + THETA_MIN
 
 
 def cnn_predict_with_unc(model, img_cnn, device, mc_samples=30, add_fft_channel=False):
@@ -437,16 +425,11 @@ def main():
     require_file(MODEL_PATH, "Model checkpoint")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ckpt = load_model_checkpoint(MODEL_PATH, map_location=device)
-    n_ch = ckpt.get("n_channels", 1) if isinstance(ckpt, dict) else 1
-    dropout = ckpt.get("dropout", 0.3) if isinstance(ckpt, dict) else 0.3
-    add_fft = ckpt.get("add_fft_channel", False) if isinstance(ckpt, dict) else False
-    base_n_ch = ckpt.get("base_n_channels", n_ch) if isinstance(ckpt, dict) else n_ch
-    model = build_model(n_channels=n_ch, dropout=dropout).to(device)
-    model.load_state_dict(state_dict_from_checkpoint(ckpt))
-    model.eval()
+    model, meta = load_model_from_checkpoint(MODEL_PATH, device)
+    base_n_ch = meta["base_n_channels"]
+    add_fft = meta["add_fft_channel"]
     fft_str = "（含FFT通道）" if add_fft else ""
-    print(f"\n模型加载完成，设备: {device}，通道数: {n_ch}{fft_str}")
+    print(f"\n模型加载完成，设备: {device}，通道数: {meta['n_channels']}{fft_str}")
 
     results = run_graded_eval(model, device, n_channels=base_n_ch,
                               mc_samples=args.mc_samples, add_fft_channel=add_fft)

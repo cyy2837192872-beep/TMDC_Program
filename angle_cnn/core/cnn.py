@@ -15,9 +15,7 @@ import torch
 import torch.nn as nn
 from torchvision.models import resnet18, resnet34, resnet50
 
-# Default regression range (degrees). Keep in sync with dataset generation.
-THETA_MIN = 0.5
-THETA_MAX = 5.0
+from .config import THETA_MAX, THETA_MIN
 
 
 def detect_n_channels(images: np.ndarray) -> int:

@@ -67,7 +67,8 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from moire_pipeline import moire_period, A_NM  # noqa: E402
+from core.config import A_NM, DEFAULT_PPP, IMG_SIZE, SIM_SIZE, THETA_MIN, THETA_MAX  # noqa: E402
+from core.physics import moire_period  # noqa: E402
 from core.fonts import cjk_fontproperties  # noqa: E402
 from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
 from core.degrade import (  # noqa: E402
@@ -87,10 +88,6 @@ logger = logging.getLogger(__name__)
 
 # ── 默认参数 ──────────────────────────────────────────────
 DEFAULT_TOTAL_SAMPLES = 50000  # GPU 快速训练：更多数据 → 更好泛化
-DEFAULT_IMG_SIZE = 128
-DEFAULT_PPP = 20
-DEFAULT_THETA_MIN = 0.5
-DEFAULT_THETA_MAX = 5.0
 DEFAULT_SEED = 42
 DEFAULT_SPLIT_RATIO = (0.8, 0.1, 0.1)
 DEFAULT_N_CHANNELS = 3
@@ -120,9 +117,9 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--samples", type=int, default=DEFAULT_TOTAL_SAMPLES, help="总样本数")
-    parser.add_argument("--img-size", type=int, default=DEFAULT_IMG_SIZE, help="输出图像尺寸（像素）")
-    parser.add_argument("--theta-min", type=float, default=DEFAULT_THETA_MIN, help="最小转角（度）")
-    parser.add_argument("--theta-max", type=float, default=DEFAULT_THETA_MAX, help="最大转角（度）")
+    parser.add_argument("--img-size", type=int, default=IMG_SIZE, help="输出图像尺寸（像素）")
+    parser.add_argument("--theta-min", type=float, default=THETA_MIN, help="最小转角（度）")
+    parser.add_argument("--theta-max", type=float, default=THETA_MAX, help="最大转角（度）")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="随机种子")
     parser.add_argument("--workers", type=int, default=None,
                         help="并行 worker 数（默认 auto = cpu_count/2）")
@@ -150,7 +147,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def generate_moire_raw(theta_deg, ppp=DEFAULT_PPP, n=512, a_nm=A_NM, seed=None):
+def generate_moire_raw(theta_deg, ppp=DEFAULT_PPP, n=SIM_SIZE, a_nm=A_NM, seed=None):
     """Legacy single-channel generator (backward-compatible)."""
     rng = np.random.default_rng(seed)
     theta_rad = np.radians(theta_deg)
@@ -428,9 +425,9 @@ def generate_dataset(
     n_total: int = DEFAULT_TOTAL_SAMPLES,
     seed: int = DEFAULT_SEED,
     parallel_workers: int | None = None,
-    img_size: int = DEFAULT_IMG_SIZE,
-    theta_min: float = DEFAULT_THETA_MIN,
-    theta_max: float = DEFAULT_THETA_MAX,
+    img_size: int = IMG_SIZE,
+    theta_min: float = THETA_MIN,
+    theta_max: float = THETA_MAX,
     n_channels: int = DEFAULT_N_CHANNELS,
     tip_radius_nm: float = DEFAULT_TIP_RADIUS_NM,
     tip_radius_range: Tuple[float, float] | None = DEFAULT_TIP_RADIUS_RANGE,

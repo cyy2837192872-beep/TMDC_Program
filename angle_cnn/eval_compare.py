@@ -81,10 +81,10 @@ from dataset_generator import (  # noqa: E402
     _subseed,
     generate_sample_paired_cnn_fft,
 )
-from moire_pipeline import A_NM, extract_angle_fft, moire_period  # noqa: E402
+from core.config import THETA_MIN, THETA_MAX  # noqa: E402
+from core.physics import A_NM, moire_period, FIXED_FOV_NM  # noqa: E402
+from moire_pipeline import extract_angle_fft  # noqa: E402
 from core.cnn import (  # noqa: E402
-    THETA_MAX,
-    THETA_MIN,
     build_model,
     compute_fft_channel,
     detect_n_channels,
@@ -94,8 +94,6 @@ from core.metrics import (  # noqa: E402
     compute_calibration_metrics,
     compute_stratified_metrics,
 )
-
-FIXED_FOV_NM = 10 * moire_period(THETA_MIN)
 
 setup_matplotlib_cjk_font()
 

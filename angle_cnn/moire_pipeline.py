@@ -39,51 +39,22 @@ import sys
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
-from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
 
-setup_matplotlib_cjk_font()
+# Re-export for backward compatibility with existing imports
+from core.config import A_NM, SIM_SIZE as N, DEFAULT_PPP as PPP  # noqa: E402
+from core.physics import moire_period, theta_from_period, angle_uncertainty  # noqa: E402
 
 OUT = os.path.join(os.path.dirname(__file__), 'outputs')
-os.makedirs(OUT, exist_ok=True)
 
-# ── 全局参数 ──────────────────────────────────────────────────────────────────
-A_NM = 0.316   # MoS₂ 晶格常数 (nm)
-N    = 512     # 图像像素数（正方形）
-PPP  = 20      # Pixels Per moiré Period（图像空间每 moiré 周期占多少像素）
-               # FFT 峰位于像素半径 r = N/PPP = 512/20 = 25.6 px 处
+_font_initialized = False
 
 
-# ── 物理公式 ──────────────────────────────────────────────────────────────────
-
-def moire_period(theta_deg, a_nm=A_NM):
-    """
-    从转角计算 moiré 周期
-
-    推导：
-      六角晶格第一壳层倒格矢大小 G = 4π/(a√3)
-      两层旋转 θ 后，差矢大小 |ΔG| = 2G·sin(θ/2)
-      L = 2π/|ΔG| = a√3 / (4·sin(θ/2))
-    """
-    if theta_deg == 0:
-        raise ValueError("θ=0 无意义")
-    theta_rad = np.radians(theta_deg)
-    return a_nm * np.sqrt(3) / (4.0 * np.sin(theta_rad / 2.0))
-
-
-def theta_from_period(L_nm, a_nm=A_NM):
-    """从 moiré 周期反推转角（度）"""
-    arg = np.clip(a_nm * np.sqrt(3) / (4.0 * L_nm), -1.0, 1.0)
-    return 2.0 * np.degrees(np.arcsin(arg))
-
-
-def angle_uncertainty(fov_nm, a_nm=A_NM):
-    """
-    FFT 频率分辨率传播到角度的理论不确定度（度）
-
-    δθ_rad = a√3 / (2·fov_nm)，与 θ 无关
-    物理含义：不确定度只由视野大小决定，与转角无关
-    """
-    return np.degrees(a_nm * np.sqrt(3) / (2.0 * fov_nm))
+def _ensure_font():
+    global _font_initialized
+    if not _font_initialized:
+        from core.fonts import setup_matplotlib_cjk_font
+        setup_matplotlib_cjk_font()
+        _font_initialized = True
 
 
 # ── moiré 图案仿真（超晶格包络）─────────────────────────────────────────────
@@ -109,50 +80,16 @@ def generate_moire(theta_deg, a_nm=A_NM, n=N, ppp=PPP,
     fov_nm : 视野（nm）
     L_nm   : moiré 周期（nm）
     """
+    from core.moire_sim import _compute_moire_fields
+
     rng = np.random.default_rng(seed)
-    theta_rad = np.radians(theta_deg)
 
-    L_nm       = moire_period(theta_deg, a_nm)
-    nm_per_pix = L_nm / ppp
-    fov_nm     = n * nm_per_pix
+    L_nm = moire_period(theta_deg, a_nm)
+    fov_nm = n * (L_nm / ppp)
 
-    x = np.linspace(0.0, fov_nm, n, endpoint=False)
-    X, Y = np.meshgrid(x, x)
-
-    q_m = 2.0 * np.pi / L_nm   # moiré 波矢大小
-
-    psi = np.zeros((n, n), dtype=complex)
-    for k in range(3):
-        phi = theta_rad / 2.0 + np.radians(60.0 * k)
-        psi += np.exp(1j * (q_m * np.cos(phi) * X + q_m * np.sin(phi) * Y))
-
-    # ── 连续晶格重构模型 ─────────────────────────────────────
-    # 将原来的 if θ<2° / else 硬切换改为连续插值，消除 2° 处的人工不连续性。
-    #
-    # strength = clip(1 - θ/2, 0, 1) 是重构强度权重：
-    #   θ = 0°  → strength = 1.0（完全 AB/BA 三角畴，强锐化边界）
-    #   θ = 1°  → strength = 0.5（三角畴与正弦调制各半，过渡区）
-    #   θ ≥ 2° → strength = 0.0（纯正弦调制，退化为 real(ψ)）
-    #
-    # 物理依据：Weston et al. Nat. Nanotechnol. 2020 表明晶格重构在
-    # θ < 2° 时主导图案，随转角增大连续减弱，无实验证据支持硬切换。
-    #
-    # 数学验证（strength=0 时公式连续退化）：
-    #   R_sharp → R，phase_quant 权重 → 0，Phi_recon → Phi
-    #   img = R·cos(Phi) = real(ψ)  ✓ 与原 else 分支完全一致
-    strength = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
-    R        = np.abs(psi)
-    Phi      = np.angle(psi)
-
-    # R_sharp：strength=0 时退化为 R（无锐化），strength=1 时强锐化
-    R_sharp = ((1.0 - strength) * R
-               + strength * np.tanh(strength * 8.0 * R / (R.max() + 1e-9)) * R.max())
-
-    # AB/BA 两态相位量化（strength=0 时权重为零，自然消失）
-    # Im(ψ) 符号区分两类堆叠域：+1=AB（相位→0），-1=BA（相位→π）
-    domain_sign = np.sign(np.imag(psi))
-    phase_quant = (domain_sign + 1) / 2.0 * np.pi   # AB→0, BA→π
-    Phi_recon   = (1.0 - strength) * Phi + strength * phase_quant
+    _, R_sharp, Phi_recon, _, _, fov_nm = _compute_moire_fields(
+        theta_deg, fov_nm, n, a_nm
+    )
 
     img = R_sharp * np.cos(Phi_recon)
 
@@ -272,6 +209,7 @@ def extract_angle_fft(image, fov_nm, a_nm=A_NM, ppp=PPP, n_peaks=6):
 
 def show_single(theta_deg, noise=0.0, blur=0.0, save=True):
     """单角度完整分析：moiré图 + FFT功率谱 + 峰提取汇总"""
+    _ensure_font()
     img, fov_nm, L_true = generate_moire(theta_deg, noise=noise, blur=blur)
     th, unc, info = extract_angle_fft(img, fov_nm)
 
@@ -329,6 +267,7 @@ def show_single(theta_deg, noise=0.0, blur=0.0, save=True):
     if save:
         noise_tag = f'_noise{noise:.0%}' if noise > 0 else ''
         blur_tag  = f'_blur{blur:.0f}px' if blur > 0 else ''
+        os.makedirs(OUT, exist_ok=True)
         fname = os.path.join(OUT, f'single_{theta_deg}deg{noise_tag}{blur_tag}.png')
         plt.savefig(fname, dpi=150, bbox_inches='tight')
         print(f'  已保存: {fname}')
@@ -342,6 +281,7 @@ def show_single(theta_deg, noise=0.0, blur=0.0, save=True):
 
 def show_gallery(thetas=None, save=True):
     """不同转角的 moiré 图案 gallery（论文图）"""
+    _ensure_font()
     if thetas is None:
         thetas = [0.5, 1.0, 2.0, 3.0, 5.0]
 
@@ -364,12 +304,14 @@ def show_gallery(thetas=None, save=True):
 
     plt.tight_layout()
     if save:
+        os.makedirs(OUT, exist_ok=True)
         plt.savefig(os.path.join(OUT, 'moire_gallery.png'), dpi=150, bbox_inches='tight')
         print(f'  已保存: {os.path.join(OUT, "moire_gallery.png")}')
     plt.show()
 
 
 def validation_sweep(thetas=None, noise=0.0, save=True):
+    _ensure_font()
     """
     多角度误差扫描
 
@@ -422,6 +364,7 @@ def validation_sweep(thetas=None, noise=0.0, save=True):
     plt.tight_layout()
     if save:
         tag = f'_noise{noise:.0%}' if noise > 0 else ''
+        os.makedirs(OUT, exist_ok=True)
         plt.savefig(os.path.join(OUT, f'moire_validation{tag}.png'), dpi=150, bbox_inches='tight')
         print(f'\n  已保存: {os.path.join(OUT, f"moire_validation{tag}.png")}')
     plt.show()
@@ -504,6 +447,7 @@ if __name__ == '__main__':
         print()
 
     fig, ax = plt.subplots(figsize=(9, 5))
+    _ensure_font()
     for theta in test_thetas:
         ax.plot(noise_levels, results[theta], 'o-', ms=6, lw=2, label=f'θ = {theta}°')
     ax.axhline(0.1, color='red', ls='--', lw=1.5, label='失效阈值 0.1°')
@@ -512,6 +456,7 @@ if __name__ == '__main__':
            title=r'MoS$_2$ FFT 方法噪声鲁棒性测试')
     ax.legend(); ax.grid(alpha=0.3)
     path = os.path.join(OUT, 'noise_stress_test.png')
+    os.makedirs(OUT, exist_ok=True)
     plt.savefig(path, dpi=150, bbox_inches='tight')
     print(f'\n  已保存: {path}')
     plt.show()

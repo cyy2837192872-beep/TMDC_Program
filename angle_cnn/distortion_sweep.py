@@ -32,14 +32,12 @@ if SCRIPT_DIR not in sys.path:
 
 from core.degrade import apply_affine_distortion, apply_tip_convolution  # noqa: E402
 from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
-from core.io_utils import load_model_checkpoint, require_file, state_dict_from_checkpoint  # noqa: E402
+from core.io_utils import require_file  # noqa: E402
+from core.config import IMG_SIZE  # noqa: E402
+from core.physics import moire_period, FIXED_FOV_NM  # noqa: E402
 from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
-from moire_pipeline import extract_angle_fft, moire_period  # noqa: E402
-from train_cnn import THETA_MAX, THETA_MIN, build_model, compute_fft_channel, detect_n_channels  # noqa: E402
-
-# 常量（与 dataset_generator.py 保持一致）
-IMG_SIZE = 128
-FIXED_FOV_NM = 10 * moire_period(THETA_MIN)
+from core.eval_utils import load_model_from_checkpoint, cnn_predict_single  # noqa: E402
+from moire_pipeline import extract_angle_fft  # noqa: E402
 
 # Will be set at runtime from checkpoint metadata
 _N_CHANNELS = 1
@@ -114,19 +112,7 @@ def make_image(theta_deg, shear, seed, n_channels=1):
     return img_cnn, img_512_height, fov_nm, actual_ppp
 
 
-def cnn_predict(model, img_cnn, device):
-    if img_cnn.ndim == 2:
-        x = torch.from_numpy(img_cnn).unsqueeze(0).unsqueeze(0).float().to(device)
-    else:
-        x = torch.from_numpy(img_cnn).unsqueeze(0).float().to(device)
-    if _ADD_FFT_CHANNEL:
-        x = compute_fft_channel(x)
-    with torch.no_grad():
-        pred_norm = max(0.0, min(1.0, model(x).item()))
-    return pred_norm * (THETA_MAX - THETA_MIN) + THETA_MIN
-
-
-def run_sweep(model, device):
+def run_sweep(model, device, add_fft_channel=False):
     results = {theta: {"fft": [], "cnn": []} for theta in TEST_THETAS}
     total = len(TEST_THETAS) * len(SHEAR_LEVELS)
     done = 0
@@ -145,7 +131,7 @@ def run_sweep(model, device):
                 if th_fft is not None:
                     fft_errs.append(abs(th_fft - theta))
 
-                th_cnn = cnn_predict(model, img_128, device)
+                th_cnn = cnn_predict_single(model, img_128, device, add_fft_channel=add_fft_channel)
                 cnn_errs.append(abs(th_cnn - theta))
 
             fft_mae = np.median(fft_errs) if fft_errs else np.nan
@@ -286,21 +272,14 @@ if __name__ == "__main__":
     MODEL_PATH = os.path.join(SCRIPT_DIR, "outputs", "best_model.pt")
     require_file(MODEL_PATH, "Model checkpoint")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt = load_model_checkpoint(MODEL_PATH, map_location=device)
-    n_ch = ckpt.get("n_channels", 1) if isinstance(ckpt, dict) else 1
-    dropout = ckpt.get("dropout", 0.3) if isinstance(ckpt, dict) else 0.3
-    add_fft = ckpt.get("add_fft_channel", False) if isinstance(ckpt, dict) else False
-    base_n_ch = ckpt.get("base_n_channels", n_ch) if isinstance(ckpt, dict) else n_ch
-    _N_CHANNELS = n_ch  # noqa: F841 — used by cnn_predict
-    _BASE_N_CHANNELS = base_n_ch
-    _ADD_FFT_CHANNEL = add_fft
-    model = build_model(n_channels=n_ch, dropout=dropout).to(device)
-    model.load_state_dict(state_dict_from_checkpoint(ckpt))
-    model.eval()
-    fft_str = "+FFT" if add_fft else ""
-    print(f"device: {device}, channels: {n_ch}{fft_str}, model: {MODEL_PATH}\n")
 
-    results = run_sweep(model, device)
+    model, meta = load_model_from_checkpoint(MODEL_PATH, device)
+    _BASE_N_CHANNELS = meta["base_n_channels"]
+    add_fft = meta["add_fft_channel"]
+    fft_str = "+FFT" if add_fft else ""
+    print(f"device: {device}, channels: {meta['n_channels']}{fft_str}, model: {MODEL_PATH}\n")
+
+    results = run_sweep(model, device, add_fft_channel=add_fft)
     improvement = plot_sweep(results)
     save_csv(results, improvement)
 

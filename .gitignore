@@ -6,6 +6,7 @@ data/
 
 # Experiment artifacts
 angle_cnn/outputs/
+angle_cnn/outputs_v2/
 
 # LaTeX build artifacts
 thesis/hust_bachelor_cse/*.aux
