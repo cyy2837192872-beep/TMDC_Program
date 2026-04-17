@@ -421,7 +421,7 @@ FFT 在两种条件下会显著失效：
 
 \begin{verbatim}
 # 连续晶格重构（无 if 硬切换）
-# strength = clip(1 - θ/2, 0, 1)：θ=0°→1.0，θ≥2°→0.0
+# strength = clip(1 - theta_deg/2, 0, 1): theta=0 deg -> 1.0, theta>=2 deg -> 0.0
 strength = np.clip(1.0 - theta_deg / 2.0, 0.0, 1.0)
 R   = np.abs(psi)
 Phi = np.angle(psi)
@@ -432,7 +432,7 @@ R_sharp = ((1.0 - strength) * R
                strength * 8.0 * R / (R.max() + 1e-9)
              ) * R.max())
 
-# AB/BA 两态相位量化：Im(ψ) 符号区分堆叠域
+# AB/BA 两态相位量化：Im(psi) 符号区分堆叠域
 domain_sign = np.sign(np.imag(psi))
 phase_quant = (domain_sign + 1) / 2.0 * np.pi  # AB->0, BA->pi
 Phi_recon   = (1.0 - strength) * Phi + strength * phase_quant
@@ -466,10 +466,10 @@ img = img + noise * ptp * rng.standard_normal(img.shape)
 \subsection{FFT vs CNN 公平对比报告节选（\texttt{compare\_report.txt}）}
 
 \begin{verbatim}
-MoS₂ moiré：FFT vs CNN 角度提取公平对比报告
+MoS2 moiré：FFT vs CNN 角度提取公平对比报告
 ==================================================
 
-材料：MoS₂ 转角同质结（a = 0.316 nm）
+材料：MoS2 转角同质结（a = 0.316 nm）
 对比方法：
   CNN：128×128 三通道数据集图像（与训练一致）
   FFT：512×512 高度图重新生成（训练分布内退化）
@@ -485,8 +485,7 @@ std (°)                    0.0552       0.0737
 90th pct (°)               0.1264       0.1992
 最大误差 (°)                   0.3340       0.4427
 
-CNN 比 FFT 精度提升：0.5 倍
-（注：该比值定义为 MAE_FFT/MAE_CNN；公平口径下 FFT 更优时小于 1。）
+MAE 比值 MAE_FFT / MAE_CNN 约 0.52（小于 1 表示 FFT 平均误差更小；以当次 eval_compare.py 输出为准）
 
 MC Dropout 不确定性:
   平均不确定性: ±0.242°
