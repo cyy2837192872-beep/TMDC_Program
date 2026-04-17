@@ -144,18 +144,18 @@ MoS$_2$ 属于六方晶系，$D_{3h}$ 点群，晶格常数 $a = 0.316\,\mathrm{
 \end{equation}
 其中 $\mathrm{fov}$ 为图像物理视野（nm）。式~\eqref{eq:fft_uncertainty} 表明 FFT 的角度不确定度与 $\theta$ 本身无关，仅由视野决定：增大扫描视野可以线性减小 FFT 的理论误差下限。
 
-表~\ref{tab:moire_params} 给出不同转角下的 moiré 参数及 FFT 理论不确定度（每 moiré 周期 20 像素）。
+表~\ref{tab:moire_params} 给出在\textbf{固定仿真视野} $\mathrm{fov}=10\,L(0.5^{\circ})\approx 314\,\mathrm{nm}$（与数据集 \texttt{FIXED\_FOV} 一致）下，不同转角对应的 $L$、视场内莫尔周期数 $N\approx\mathrm{fov}/L$，以及 $512\times 512$ 仿真栅格上的每周期像素数 $\mathrm{ppp}=N\cdot L/\mathrm{fov}=512\,L/\mathrm{fov}$（随 $\theta$ 变化，并非常数）。由式~\eqref{eq:fft_uncertainty}，$\delta\theta$ 仅取决于 $\mathrm{fov}$，故该设定下 FFT 理论不确定度对各 $\theta$ 相同（约 $\pm 0.050^{\circ}$）。
 
-\begin{generaltab}{MoS$_2$ 不同转角下的 moiré 参数（$a = 0.316\,\mathrm{nm}$）}{tab:moire_params}
-  \begin{tabularx}{\textwidth}{CCCC}
+\begin{generaltab}{MoS$_2$ 不同转角下的莫尔参数（$a = 0.316\,\mathrm{nm}$；固定 $\mathrm{fov}\approx 314\,\mathrm{nm}$）}{tab:moire_params}
+  \begin{tabularx}{\textwidth}{CCCCC}
     \toprule
-    转角 $\theta$ ($^{\circ}$) & moiré 周期 $L$ (nm) & 视野 fov (nm) & 理论 $\delta\theta$ ($^{\circ}$) \\
+    转角 $\theta$ ($^{\circ}$) & $L$ (nm) & $\mathrm{fov}$ (nm) & $N\approx\mathrm{fov}/L$ & $\mathrm{ppp}$ ($512^2$) \\
     \midrule
-    0.5 & 31.4 & 628.0 & $\pm 0.025$ \\
-    1.0 & 15.7 & 314.0 & $\pm 0.050$ \\
-    2.0 & 7.8  & 157.0 & $\pm 0.100$ \\
-    3.0 & 5.2  & 104.7 & $\pm 0.150$ \\
-    5.0 & 3.1  & 62.8  & $\pm 0.249$ \\
+    0.5 & 31.4 & 313.6 & 10.0 & 51.2 \\
+    1.0 & 15.7 & 313.6 & 20.0 & 25.6 \\
+    2.0 & 7.8  & 313.6 & 40.0 & 12.8 \\
+    3.0 & 5.2  & 313.6 & 60.0 & 8.5 \\
+    5.0 & 3.1  & 313.6 & 100.0 & 5.1 \\
     \bottomrule
   \end{tabularx}
 \end{generaltab}

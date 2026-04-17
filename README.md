@@ -115,7 +115,7 @@ python dataset_generator.py --samples 20000 --workers 8
 
 输出默认：`../data/moire_dataset.npz`（相对 `angle_cnn/`）。**大文件已被 .gitignore**，需本地生成或自备。
 
-与 `core/config.py` 对齐的常用默认：**θ ∈ [0.5°, 5°]**，**CNN 裁剪 128**，推荐仿真 **512**（与 `eval_compare` 高分辨率 FFT 口径一致）。
+与 `core/config.py` 对齐的常用默认：**θ ∈ [0.5°, 5°]**，**CNN 裁剪 128**，推荐仿真 **512**（与 `eval_compare` 高分辨率 FFT 口径一致）。**若你曾在 2026-04 之前的代码版本上生成过 `.npz`，请用当前 `core/moire_sim.py`（固定 nm 视野）重新生成数据集后再训练**，以免与论文中「固定物理视野」表述不一致。
 
 ### 2. 训练 CNN
 

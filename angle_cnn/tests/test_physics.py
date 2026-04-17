@@ -67,3 +67,25 @@ class TestFixedFov:
         from core.physics import moire_period, FIXED_FOV_NM
         expected = 10.0 * moire_period(THETA_MIN)
         assert abs(FIXED_FOV_NM - expected) < 1e-10
+
+
+class TestPixelsPerMoirePeriod:
+    def test_matches_n_L_over_fov(self):
+        from core.physics import FIXED_FOV_NM, moire_period, pixels_per_moire_period
+
+        n = 512
+        theta = 1.0
+        L = moire_period(theta)
+        ppp = pixels_per_moire_period(n, theta, FIXED_FOV_NM)
+        assert abs(ppp - n * L / FIXED_FOV_NM) < 1e-6
+
+    def test_r_peak_identity(self):
+        """extract_angle_fft uses r_peak = n_img / ppp = fov / L."""
+        from core.physics import FIXED_FOV_NM, moire_period, pixels_per_moire_period
+
+        n = 512
+        theta = 2.0
+        L = moire_period(theta)
+        ppp = pixels_per_moire_period(n, theta, FIXED_FOV_NM)
+        r_peak = n / ppp
+        assert abs(r_peak - FIXED_FOV_NM / L) < 1e-6

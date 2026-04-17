@@ -33,9 +33,10 @@ def _compute_moire_fields(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
     """Core computation shared by single- and multi-channel synthesis.
 
-    ``fixed_fov_nm`` is the physical scan width/height (nm): coordinates run
-    ``[0, fov_nm)`` so that moiré period L(θ) implies ~``fov_nm / L`` periods
-    across the image — **independent of θ** when ``fixed_fov_nm`` is constant.
+    ``fixed_fov_nm`` is the physical scan width/height (nm); coordinates run
+    ``[0, fov_nm)``. The number of moiré periods across the raster is
+    ~``fov_nm / L(θ)`` and **does** vary with θ; what stays fixed when
+    ``fixed_fov_nm`` is constant is the **nanometre extent**, not the period count.
 
     Returns (psi, R_sharp, Phi_recon, domain_sign, strength, fov_nm).
     """

@@ -45,4 +45,4 @@ class TestSynthesize:
     def test_fov_consistency(self):
         from core.moire_sim import synthesize_reconstructed_moire
         _, fov = synthesize_reconstructed_moire(2.0, FIXED_FOV_NM, n=512)
-        assert fov > 0
+        assert abs(fov - FIXED_FOV_NM) < 1e-6

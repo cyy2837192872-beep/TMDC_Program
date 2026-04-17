@@ -148,7 +148,12 @@ def parse_args():
 
 
 def generate_moire_raw(theta_deg, ppp=DEFAULT_PPP, n=SIM_SIZE, a_nm=A_NM, seed=None):
-    """Legacy single-channel generator (backward-compatible)."""
+    """Legacy single-channel generator (fixed ``ppp`` pixels per period).
+
+    This fixes nm/pixel via ``L/ppp`` and does **not** match the dataset path
+    (fixed physical FOV → use ``synthesize_reconstructed_moire`` /
+    ``synthesize_multichannel_moire``). Kept for old scripts only.
+    """
     rng = np.random.default_rng(seed)
     theta_rad = np.radians(theta_deg)
     L_nm = moire_period(theta_deg, a_nm)
