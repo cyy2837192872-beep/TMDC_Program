@@ -21,7 +21,9 @@ moiré 超周期由六角倒格矢之差决定：
 
 直接仿真 moiré 包络的好处：
   - 避免仿真原子晶格带来的混叠（a=0.316nm << moiré 视野）
-  - FFT 中 moiré 峰强且位置精确，峰在像素距离 N/PPP 处
+  - FFT 中 moiré 峰强且位置精确；主峰半径约 r_peak = N/ppp，其中 ppp 为
+    每莫尔周期像素数（``generate_moire`` 中由 fov=n·L/ppp 与 ``core.physics.pixels_per_moire_period``
+    所用定义一致）
   - 更接近 AFM/STM 高度图的物理含义（高度调制 = moiré 包络）
 
 FFT 分辨率决定的角度不确定度（误差传播）：
@@ -279,8 +281,12 @@ def show_single(theta_deg, noise=0.0, blur=0.0, save=True):
     return th, unc
 
 
-def show_gallery(thetas=None, save=True):
-    """不同转角的 moiré 图案 gallery（论文图）"""
+def show_gallery(thetas=None, save=True, show=True):
+    """不同转角的 moiré 图案 gallery（论文图）。
+
+    固定物理视野 ``FIXED_FOV = 10·L(θ_min)``（与各子图最小转角一致，与数据集 ``FIXED_FOV_NM`` 同构）。
+    通过 ``ppp = N·L(θ)/FIXED_FOV`` 使 ``generate_moire`` 的栅格覆盖同一 nm 尺寸。
+    """
     _ensure_font()
     if thetas is None:
         thetas = [0.5, 1.0, 2.0, 3.0, 5.0]
@@ -288,8 +294,7 @@ def show_gallery(thetas=None, save=True):
     fig, axes = plt.subplots(1, len(thetas), figsize=(4.2 * len(thetas), 4.5))
     fig.suptitle(r'MoS$_2$ moiré 图案 vs 转角（仿真）', fontsize=13, y=1.01)
 
-    # 固定视野：以最小转角的 moiré 周期为基准，所有子图共享同一物理视野
-    # 提到循环外，避免每次迭代重复计算
+    # 固定 nm 视野：与 core.physics.FIXED_FOV_NM（=10·L(0.5°)）一致
     FIXED_FOV = 10 * moire_period(min(thetas))
 
     for ax, theta in zip(axes, thetas):
@@ -307,7 +312,10 @@ def show_gallery(thetas=None, save=True):
         os.makedirs(OUT, exist_ok=True)
         plt.savefig(os.path.join(OUT, 'moire_gallery.png'), dpi=150, bbox_inches='tight')
         print(f'  已保存: {os.path.join(OUT, "moire_gallery.png")}')
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 def validation_sweep(thetas=None, noise=0.0, save=True):

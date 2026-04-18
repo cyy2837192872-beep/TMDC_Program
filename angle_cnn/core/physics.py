@@ -25,10 +25,14 @@ def moire_period(theta_deg: float, a_nm: float = A_NM) -> float:
     return float(a_nm * np.sqrt(3) / (4.0 * np.sin(theta_rad / 2.0)))
 
 
-def theta_from_period(L_nm: float, a_nm: float = A_NM) -> float:
-    """Inverse: twist angle (degrees) from moiré period."""
-    arg = np.clip(a_nm * np.sqrt(3) / (4.0 * L_nm), -1.0, 1.0)
-    return float(2.0 * np.degrees(np.arcsin(arg)))
+def theta_from_period(L_nm: float | np.ndarray, a_nm: float = A_NM) -> float | np.ndarray:
+    """Inverse: twist angle (degrees) from moiré period (scalar or array)."""
+    L = np.asarray(L_nm, dtype=np.float64)
+    arg = np.clip(a_nm * np.sqrt(3) / (4.0 * L), -1.0, 1.0)
+    out = 2.0 * np.degrees(np.arcsin(arg))
+    if np.ndim(L_nm) == 0:
+        return float(out)
+    return out
 
 
 def angle_uncertainty(fov_nm: float, a_nm: float = A_NM) -> float:

@@ -38,6 +38,14 @@ class TestThetaFromPeriod:
         theta = theta_from_period(1000.0)
         assert 0 < theta < 0.1
 
+    def test_vectorized_period(self):
+        from core.physics import moire_period, theta_from_period
+        import numpy as np
+        thetas = np.array([0.5, 1.0, 2.0, 3.0])
+        Ls = np.array([moire_period(float(t)) for t in thetas])
+        back = theta_from_period(Ls)
+        np.testing.assert_allclose(back, thetas, rtol=1e-5)
+
 
 class TestAngleUncertainty:
     def test_decreases_with_fov(self):
