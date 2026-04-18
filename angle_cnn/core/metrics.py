@@ -106,7 +106,7 @@ def compute_stratified_metrics(
     n_angle_bins: int = 10,
     small_angle_threshold: float = 1.5,
     large_angle_threshold: float = 3.5,
-    percentiles: List[int] = [50, 90, 95, 99],
+    percentiles: tuple[int, ...] = (50, 90, 95, 99),
 ) -> StratifiedMetrics:
     """计算分层评估指标。
 

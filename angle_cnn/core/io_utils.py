@@ -68,6 +68,8 @@ def load_model_checkpoint(
 
         sig = inspect.signature(torch.load)
         if "weights_only" in sig.parameters:
+            # weights_only=False required: checkpoint dicts contain non-tensor
+            # metadata (arch, dropout, epoch, etc.) alongside model_state_dict
             kwargs["weights_only"] = False
     except Exception:
         pass

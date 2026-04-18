@@ -229,7 +229,7 @@ class TestMetrics:
         assert "overall_mae" in d
         assert "p90" in d
         assert "p95" in d
-        assert isinstance(d["overall_mae"], float)
+        assert isinstance(d["overall_mae"], (float, np.floating))
 
     def test_metrics_summary(self, sample_predictions):
         """测试指标摘要输出。"""

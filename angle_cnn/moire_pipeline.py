@@ -33,7 +33,6 @@ FFT 分辨率决定的角度不确定度（误差传播）：
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, maximum_filter
-import matplotlib.pyplot as plt
 import warnings
 import os
 import sys
@@ -54,9 +53,18 @@ _font_initialized = False
 def _ensure_font():
     global _font_initialized
     if not _font_initialized:
+        import matplotlib
+        matplotlib.use("Agg")
         from core.fonts import setup_matplotlib_cjk_font
         setup_matplotlib_cjk_font()
         _font_initialized = True
+
+
+def _import_plt():
+    """Lazy import matplotlib.pyplot with Agg backend and CJK font."""
+    _ensure_font()
+    import matplotlib.pyplot as plt
+    return plt
 
 
 # ── moiré 图案仿真（超晶格包络）─────────────────────────────────────────────
@@ -211,7 +219,7 @@ def extract_angle_fft(image, fov_nm, a_nm=A_NM, ppp=PPP, n_peaks=6):
 
 def show_single(theta_deg, noise=0.0, blur=0.0, save=True):
     """单角度完整分析：moiré图 + FFT功率谱 + 峰提取汇总"""
-    _ensure_font()
+    plt = _import_plt()
     img, fov_nm, L_true = generate_moire(theta_deg, noise=noise, blur=blur)
     th, unc, info = extract_angle_fft(img, fov_nm)
 
@@ -287,7 +295,7 @@ def show_gallery(thetas=None, save=True, show=True):
     固定物理视野 ``FIXED_FOV = 10·L(θ_min)``（与各子图最小转角一致，与数据集 ``FIXED_FOV_NM`` 同构）。
     通过 ``ppp = N·L(θ)/FIXED_FOV`` 使 ``generate_moire`` 的栅格覆盖同一 nm 尺寸。
     """
-    _ensure_font()
+    plt = _import_plt()
     if thetas is None:
         thetas = [0.5, 1.0, 2.0, 3.0, 5.0]
 
@@ -319,7 +327,7 @@ def show_gallery(thetas=None, save=True, show=True):
 
 
 def validation_sweep(thetas=None, noise=0.0, save=True):
-    _ensure_font()
+    plt = _import_plt()
     """
     多角度误差扫描
 
@@ -454,8 +462,9 @@ if __name__ == '__main__':
             print(f'  {err:>8.4f}°{marker}  ', end='')
         print()
 
+    plt = _import_plt()
+
     fig, ax = plt.subplots(figsize=(9, 5))
-    _ensure_font()
     for theta in test_thetas:
         ax.plot(noise_levels, results[theta], 'o-', ms=6, lw=2, label=f'θ = {theta}°')
     ax.axhline(0.1, color='red', ls='--', lw=1.5, label='失效阈值 0.1°')

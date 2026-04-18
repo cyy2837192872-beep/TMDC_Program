@@ -2,6 +2,8 @@
 
 从 MoS₂ **转角同质结** moiré 图像中估计扭转角 θ 的完整管线：**物理仿真 → 数据集 → CNN 训练 → FFT/CNN/融合评估 → 论文与实验文档**。
 
+**版本**：PyPI/包版本见 [`pyproject.toml`](pyproject.toml) 的 `version`。**更新说明**见 [`CHANGELOG.md`](CHANGELOG.md)。**仅跑 `angle_cnn` 脚本**时也可先看 [`angle_cnn/README.md`](angle_cnn/README.md)。
+
 | 方法 | 说明 |
 |------|------|
 | **FFT** | 频域峰与倒格矢差模型，`moire_pipeline.py` |
@@ -32,7 +34,8 @@
 ```
 tmdc-project/
 ├── angle_cnn/                      # 算法与仿真主代码
-│   ├── train_cnn.py                # CNN 训练（主线）
+│   ├── train_cnn.py                # CNN 训练（主线，当前实现见文件头 v5 说明）
+│   ├── README.md                   # 本模块最短运行路径（给 AI / 协作者）
 │   ├── train_cnn_v2.py             # 可选：双流等实验入口
 │   ├── dataset_generator.py        # 仿真数据集 .npz（多通道 + 退化）
 │   ├── moire_pipeline.py           # FFT 角度提取 + 与仿真衔接
@@ -54,6 +57,7 @@ tmdc-project/
 │       ├── metrics.py              # 分层指标、校准、报告生成
 │       ├── eval_utils.py           # 评测辅助
 │       ├── augment.py              # 训练期增强
+│       ├── train_utils.py          # 加权 Huber、EMA 更新（train_cnn 使用）
 │       ├── dual_stream.py          # 双流实验用
 │       ├── io_utils.py             # npz / checkpoint
 │       ├── io_afm.py               # Cypher .ibw 等（需 igor2）
@@ -61,8 +65,9 @@ tmdc-project/
 │       └── seed.py                 # 可复现种子
 ├── thesis/hust_bachelor_cse/       # 本科论文 LaTeX（xelatex + bibtex）
 ├── data/                           # 默认数据集输出目录（.gitignore，需本地生成）
-├── pyproject.toml                  # 包元数据、依赖、控制台入口
+├── pyproject.toml                  # 包元数据、依赖、版本号、控制台入口
 ├── requirements.txt                # pip 依赖（与 pyproject 对齐）
+├── CHANGELOG.md                    # 版本与重要变更（协作 / AI 对齐用）
 └── README.md
 ```
 
@@ -117,7 +122,7 @@ python dataset_generator.py --samples 20000 --workers 8
 
 与 `core/config.py` 对齐的常用默认：**θ ∈ [0.5°, 5°]**，**CNN 裁剪 128**，推荐仿真 **512**（与 `eval_compare` 高分辨率 FFT 口径一致）。**若你曾在 2026-04 之前的代码版本上生成过 `.npz`，请用当前 `core/moire_sim.py`（固定 nm 视野）重新生成数据集后再训练**，以免与论文中「固定物理视野」表述不一致。
 
-### 2. 训练 CNN
+### 2. 训练 CNN（`train_cnn.py` v5）
 
 ```bash
 python train_cnn.py
@@ -127,9 +132,17 @@ python train_cnn.py --fft-channel --bf16
 python train_cnn.py --mc-samples 30
 python train_cnn.py --eval-only                 # 仅评估已有 best_model.pt
 python train_cnn.py --no-compile --no-amp       # 调试
+
+# WSL / 低内存环境（OOM 时优先尝试）
+python train_cnn.py --fp16-data --num-workers 0 --batch-size 256 --no-compile
+
+# v5 可选：EMA（验证与 best_model.pt 存 EMA 权重）+ 归一化标签加权 Huber（略强调高 θ）
+python train_cnn.py --ema-decay 0.999 --angle-loss-weight 0.25
 ```
 
 详见 `python train_cnn.py --help`。**实验向**：`train_cnn_v2.py` + `core/dual_stream.py`。
+
+**Checkpoint**：`best_model.pt` 除 `model_state_dict` 外可含 `arch`、`n_channels`、`add_fft_channel`、`dropout`、`huber_delta`、`ema_decay`、`angle_loss_weight` 等；下游 `eval_compare.py` 只依赖权重与通道相关字段。
 
 ### 3. FFT vs CNN 评估（两种口径 + 融合）
 
@@ -195,7 +208,7 @@ xelatex -interaction=nonstopmode thesis.tex
 
 | 文件 | 说明 |
 |------|------|
-| `best_model.pt` | 最优权重与元数据（通道数、arch、dropout、是否 FFT 通道等） |
+| `best_model.pt` | 最优权重与元数据（通道数、arch、dropout、FFT 通道、`huber_delta`、可选 `ema_decay` / `angle_loss_weight` 等） |
 | `train_log.csv` / `train_log.png` | 训练曲线 |
 | `train_test_summary.csv` | 测试集摘要（供 `export_thesis_table.py`） |
 | `compare_report.txt` / `compare_summary.csv` | FFT/CNN（及融合）对比 |
@@ -220,6 +233,13 @@ git push origin HEAD:main
 
 - Weston et al. — 连续晶格重构与 moiré 物理图像  
 - 晶格常数：MoS₂ **a = 0.316 nm**（见 `core/config.py`）
+
+---
+
+## 版本与更新日志
+
+- **[CHANGELOG.md](CHANGELOG.md)**：按版本列出 API、训练选项、物理/评测修复与文档变更，便于他人或 AI 对齐环境。
+- 升级自 **0.1.x** 时：若曾用旧版仿真生成 `moire_dataset.npz`，请按 `CHANGELOG` 与上文「固定物理视野」说明 **重新生成数据** 后再训练/对比。
 
 ---
 

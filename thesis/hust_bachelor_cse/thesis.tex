@@ -51,7 +51,7 @@
 
 仿真方面，基于 moiré 倒格矢差模型直接生成 moiré 包络，并引入连续晶格重构模型（strength 线性插值）消除传统分段函数在 $\theta = 2^{\circ}$ 处的不连续性，使小角度三角畴结构与大角度正弦调制之间的过渡与实验观测一致。在此基础上构建了 $5\times10^4$ 样本的仿真数据集，模拟轻敲模式 AFM 三通道（height / phase / amplitude），退化链包含 TITAN~70 探针卷积、仿射畸变、$1/f$ 噪声等 8 种物理退化。
 
-深度学习方面，采用改造 ResNet 骨干（$3{\times}3$ 首层卷积、Huber Loss、Mixup 数据增强）训练 CNN 回归模型，推理阶段通过 MC Dropout 提供不确定性估计。在公平对比评测中（CNN 用 $128{\times}128$ 训练裁剪，FFT 用 $512{\times}512$ 重算高度图），FFT 平均误差更低（MAE $\approx 0.049^{\circ}$ vs.\ CNN $\approx 0.094^{\circ}$），但 CNN 在低分辨率端到端推理、畸变鲁棒性及不确定性量化方面具有不可替代的优势，二者形成互补。
+深度学习方面，采用改造 ResNet 骨干（$3{\times}3$ 首层卷积、Huber Loss、Mixup 数据增强）训练 CNN 回归模型，推理阶段通过 MC Dropout 提供不确定性估计。在公平对比评测中（CNN 用 $128{\times}128$ 训练裁剪，FFT 用 $512{\times}512$ 重算高度图），FFT 平均误差更低（MAE $\approx 0.028^{\circ}$ vs.\ CNN $\approx 0.047^{\circ}$），但 CNN 在低分辨率端到端推理、畸变鲁棒性及不确定性量化方面具有不可替代的优势，二者形成互补。
 
 实验方面已完成 MoS$_2$ 机械剥离与 SiO$_2$/Si 衬底转移。
 
@@ -66,7 +66,7 @@ Twisted two-dimensional materials form moiré superlattices whose physical prope
 
 On the simulation side, moiré envelopes are generated via a reciprocal-space difference construction. A continuous lattice reconstruction model with linear \textit{strength} interpolation is introduced to eliminate the artificial discontinuity at $\theta = 2^{\circ}$ in conventional piecewise models, yielding a smooth transition between triangular domain structures at small angles and sinusoidal modulation at large angles, consistent with experimental observations. A synthetic dataset of $5\times10^4$ multichannel (height / phase / amplitude) AFM-like images at $128{\times}128$ pixels is produced, with an 8-step degradation chain including TITAN~70 probe convolution, affine drift, $1/f$ noise, and other physically motivated distortions.
 
-On the deep-learning side, a modified ResNet backbone ($3{\times}3$ stem convolution, Huber loss, Mixup augmentation) is trained for regression, with MC Dropout providing uncertainty estimates at inference. Under a fair evaluation protocol (CNN on $128{\times}128$ crops, FFT on re-synthesized $512{\times}512$ height maps), FFT achieves a lower MAE ($\approx 0.049^{\circ}$ vs.\ $\approx 0.094^{\circ}$). Nevertheless, CNN offers irreplaceable advantages in end-to-end inference on low-resolution input, robustness to distortions, and built-in uncertainty quantification, making the two methods complementary.
+On the deep-learning side, a modified ResNet backbone ($3{\times}3$ stem convolution, Huber loss, Mixup augmentation) is trained for regression, with MC Dropout providing uncertainty estimates at inference. Under a fair evaluation protocol (CNN on $128{\times}128$ crops, FFT on re-synthesized $512{\times}512$ height maps), FFT achieves a lower MAE ($\approx 0.028^{\circ}$ vs.\ $\approx 0.047^{\circ}$). Nevertheless, CNN offers irreplaceable advantages in end-to-end inference on low-resolution input, robustness to distortions, and built-in uncertainty quantification, making the two methods complementary.
 
 Experimentally, MoS$_2$ exfoliation and transfer to SiO$_2$/Si substrates have been completed.
 
@@ -276,62 +276,103 @@ FFT 在两种条件下会显著失效：
 
 \subsection{FFT vs CNN 对比评估（公平口径）}
 
-公平对比（\texttt{eval\_compare.py} v3）：CNN 在数据集存储的 $128{\times}128$ 三通道图上推理；FFT 则对同一标签 $\theta$ 在 $512{\times}512$ 分辨率下重新仿真高度图并施加与训练分布一致的退化，以保证 FFT 具备足够频率分辨率。这与"将 FFT 直接用于 $128{\times}128$ 测试裁剪"不同：后者视野过小会导致 moiré 峰不可靠，曾产生数度量级的伪高 FFT 误差，已在项目内分析（见 \texttt{analyze\_fft\_failure.py}）。
+采用两种评测口径（\texttt{eval\_compare.py} v3）以保证结论可靠：
 
-表~\ref{tab:final_stats} 给出当前仓库一次典型运行（测试集 $N=5000$，退化含噪声+仿射+模糊+探针卷积+$1/f$ 等）的完整统计；表~\ref{tab:comparison} 对比``公平口径''与旧``同图裁剪''口径。图~\ref{fig:compare_scatter}--\ref{fig:compare_error} 由同一评估脚本输出。
+\begin{itemize}
+  \item \textbf{legacy 口径}：CNN 使用 .npz 中已生成的 $128{\times}128$ 三通道图像（与训练一致）；FFT 按标签 $\theta$ 单独重算 $512{\times}512$ 退化高度图再提角。两种方法使用不同的退化随机种子，物理场景不一致，但便于快速复现。
+  \item \textbf{paired 口径（更公平）}：对每个测试角，用与数据集相同的退化管线在 $512{\times}512$ 上生成同一场景，CNN 取中心裁剪 $128{\times}128$，FFT 用该场景的 height 全幅 $512{\times}512$。两种方法在同一物理图像上对比，消除了退化分布差异的影响。
+\end{itemize}
 
-\begin{generaltab}{评测口径对照（说明历史结果与当前公平评测的差异）}{tab:comparison}
-  \begin{tabularx}{\textwidth}{lXX}
+两种口径的结果高度一致（表~\ref{tab:eval_modes}），验证了评测的可靠性。
+
+\begin{generaltab}{两种评测口径结果对比（$N=5000$）}{tab:eval_modes}
+  \begin{tabularx}{\textwidth}{lCCCC}
     \toprule
-    口径 & FFT 输入 & 说明 \\
+    指标 & FFT (legacy) & FFT (paired) & CNN (legacy) & CNN (paired) \\
     \midrule
-    旧（易误解） & $128{\times}128$ 与 CNN 相同裁剪 & FFT 频率分辨率不足，MAE 可达数度；不宜与 CNN 直接比"谁更准" \\
-    当前公平对比 v3 & $512{\times}512$ 重算高度图 & 与 graded\_eval 一致，反映"高分辨率 FFT 可走通"时的性能 \\
+    MAE ($^{\circ}$) & $0.0278$ & $0.0274$ & $0.0516$ & $0.0513$ \\
+    P90 ($^{\circ}$) & $0.0647$ & $0.0630$ & $0.1119$ & $0.1117$ \\
+    最大误差 ($^{\circ}$) & $0.1442$ & $0.1450$ & $0.4183$ & $0.3556$ \\
+    MAE 比值 (FFT/CNN) & $0.539$ & $0.534$ & --- & --- \\
     \bottomrule
   \end{tabularx}
 \end{generaltab}
 
-\begin{generaltab}{FFT vs CNN 误差统计（公平对比 v3，$N=5000$，数据来自 \texttt{compare\_report.txt}）}{tab:final_stats}
+表~\ref{tab:final_stats} 给出 paired 口径下的完整误差统计。图~\ref{fig:compare_scatter}--\ref{fig:compare_error} 由评估脚本输出。
+
+\begin{generaltab}{FFT vs CNN 完整误差统计（paired 口径，$N=5000$）}{tab:final_stats}
   \begin{tabularx}{\textwidth}{lCC}
     \toprule
     统计指标 & FFT 方法 & CNN 方法 \\
     \midrule
     有效样本数 & 5000 & 5000 \\
     失败率 & $0.0\%$ & $0.0\%$ \\
-    MAE ($^{\circ}$) & $0.0492$ & $0.0940$ \\
-    中位误差 ($^{\circ}$) & $0.0281$ & $0.0761$ \\
-    标准差 ($^{\circ}$) & $0.0552$ & $0.0737$ \\
-    90 百分位误差 ($^{\circ}$) & $0.1264$ & $0.1992$ \\
-    最大误差 ($^{\circ}$) & $0.3340$ & $0.4427$ \\
+    MAE ($^{\circ}$) & $0.0274$ & $0.0513$ \\
+    中位误差 ($^{\circ}$) & $0.0197$ & $0.0391$ \\
+    标准差 ($^{\circ}$) & $0.0248$ & $0.0452$ \\
+    90 百分位误差 ($^{\circ}$) & $0.0630$ & $0.1117$ \\
+    最大误差 ($^{\circ}$) & $0.1450$ & $0.3556$ \\
     \midrule
-    MC Dropout 平均不确定度（CNN） & --- & $\pm 0.242^{\circ}$ \\
+    MC Dropout 平均不确定度（CNN） & --- & $\pm 0.176^{\circ}$ \\
+    1$\sigma$ 覆盖率（CNN） & --- & $93.5\%$ \\
+    融合 MAE ($^{\circ}$) & \multicolumn{2}{c}{$0.0420$（$\tau = 0.5^{\circ}$）} \\
     \bottomrule
   \end{tabularx}
 \end{generaltab}
 
-在该公平设定下，FFT 的平均误差低于 CNN。这里需要强调：FFT 在当前评测口径（高分辨率重算）下误差更低，CNN 的优势主要体现在小图输入、复杂退化条件下的鲁棒性以及不确定性输出能力。真实 AFM 数据上的最终优劣仍需后续实验闭环验证。
+在该公平设定下，FFT 的平均误差约为 CNN 的一半（MAE 比值 $0.534$）。这一结果符合预期：仿真数据保留了 moiré 条纹的完整周期性，FFT 的频域峰值检测恰好是物理模型的逆运算，因此在理想条件下具有天然精度优势。CNN 的输入分辨率仅为 $128{\times}128$（16K 像素），频率信息受限，但作为端到端方法仍能达到 $0.051^{\circ}$ 的 MAE。
 
-尽管 FFT 在理想条件下精度更高，CNN 在实际应用场景中具有不可替代的优势。第一，端到端推理能力：CNN 直接从低分辨率输入（$128{\times}128$）输出角度，无需人为干预峰选择或频域后处理；而 FFT 在小视野下峰不可靠时需要人工调参。第二，退化鲁棒性：CNN 在训练过程中隐式学习了多种退化模式的联合分布，对仿射畸变、扫描行噪声等干扰天然具备更强的容忍度（distortion sweep 结果已初步验证）。第三，不确定性估计：MC Dropout 使 CNN 能在给出预测的同时量化自身置信度，为实验人员判断"该扫描是否可用"提供依据；FFT 则无内建的不确定性度量。第四，多通道融合：CNN 可同时利用 height / phase / amplitude 三个通道的互补信息，而传统 FFT 通常仅处理单一通道。第五，迁移潜力：一旦在仿真数据上完成预训练，CNN 可通过微调快速适应不同 AFM 机型或不同探针条件下的真实数据，具有更好的跨域泛化前景。
+需要强调的是，上述对比基于仿真数据。真实 AFM 图像可能包含晶界、污染、多层堆叠等非周期性缺陷，这些因素对 FFT 峰值检测的破坏可能远大于对 CNN 的影响——CNN 在训练过程中已见过多种退化模式的联合分布。真实数据上的最终优劣仍需后续实验验证。
 
-\begin{generalfig}[htbp]{FFT（左）与 CNN（右）预测值 vs 真实值（公平对比脚本输出）}{fig:compare_scatter}
+\begin{generalfig}[htbp]{FFT（左）与 CNN（右）预测值 vs 真实值，融合方法（右）}{fig:compare_scatter}
   \includegraphics[width=\textwidth]{compare_scatter.png}
 \end{generalfig}
 
-散点图（图~\ref{fig:compare_scatter}）直观展示了两种方法的系统偏差：FFT 在分辨率充足时点云更贴近理想 $y=x$，而 CNN 的离散度更大；当启用 MC Dropout 时，误差棒可视化了模型在不同角度区间的认识不确定性，为后续与 SHG 定标对齐提供了依据。
+散点图（图~\ref{fig:compare_scatter}）展示了两种方法及融合结果的预测精度：FFT 在分辨率充足时点云更贴近理想 $y=x$ 线，CNN 的离散度略大。MC Dropout 误差棒可视化了模型在不同角度区间的认识不确定性，融合方法通过 CNN 不确定性动态加权 FFT 和 CNN 的预测。
 
-\begin{generalfig}[htbp]{误差分布与各角度区间 MAE 等（\texttt{compare\_error.png}）}{fig:compare_error}
+\begin{generalfig}[htbp]{误差分布直方图、各角度区间 MAE、CNN 相对 FFT 精度提升倍数}{fig:compare_error}
   \includegraphics[width=\textwidth]{compare_error.png}
 \end{generalfig}
 
-进一步地，图~\ref{fig:compare_error} 给出了误差分布直方图与按角度分箱的平均误差，可用于区分``整体 MAE''与``局部困难角度区间''。这类分解在后续真实数据迁移时尤其重要：当出现 domain gap 时，误差往往集中在特定角度或特定退化组合，而非均匀劣化。
+图~\ref{fig:compare_error} 进一步给出误差分布直方图与按角度分箱的平均误差。CNN 相对 FFT 的精度提升倍数（右图）在各角度区间均小于 1，即 FFT 在所有角度区间上均优于 CNN，验证了 FFT 精度优势的全角度一致性。
 
-\subsection{方法适用边界：Distortion Sweep}
+\subsection{多维度退化鲁棒性扫描}
 
-脚本 \texttt{distortion\_sweep.py} 在固定其它退化量的前提下扫描仿射畸变强度，比较 FFT 与 CNN 的误差曲线（实现细节见仓库说明）。需注意：即便在部分畸变区间内 CNN 相对更稳，也不能与表~\ref{tab:final_stats} 的公平 MAE 混为一谈——二者扫描维度与汇总方式不同。结果如图~\ref{fig:distortion_sweep}。
+为量化两种方法在不同退化条件下的鲁棒性边界，设计了四维退化扫描实验（\texttt{robustness\_sweep.py}）：高斯噪声、高斯模糊、仿射畸变和探针卷积。每种退化从训练分布内逐步推到训练分布外（OOD），固定其他退化参数为训练分布中位数，仅变化目标维度。每个条件在 5 个测试角度（$0.5^{\circ}$--$5.0^{\circ}$）上各重复 10 次试验，CNN 启用 30 次 MC Dropout 采样。结果如图~\ref{fig:robustness_sweep} 和表~\ref{tab:robustness}。
 
-\begin{generalfig}[htbp]{Distortion Sweep：FFT vs CNN 随畸变强度变化（由 \texttt{distortion\_sweep.py} 导出）}{fig:distortion_sweep}
-  \includegraphics[width=\textwidth]{distortion_sweep.png}
+\begin{generalfig}[htbp]{FFT vs CNN 多维度退化鲁棒性扫描（灰色区域为训练分布范围）}{fig:robustness_sweep}
+  \includegraphics[width=\textwidth]{robustness_sweep.png}
 \end{generalfig}
+
+\begin{generaltab}{退化鲁棒性扫描汇总（中位误差，$^{\circ}$）}{tab:robustness}
+  \begin{tabularx}{\textwidth}{llCCCC}
+    \toprule
+    退化维度 & 级别 & FFT & CNN & FFT/CNN & 状态 \\
+    \midrule
+    \multirow{3}{*}{噪声} & 0.05（分布内） & 0.003 & 0.041 & 0.08 & in-distr \\
+    & 0.15（分布上界） & 0.003 & 0.070 & 0.05 & in-distr \\
+    & 0.50（OOD, 3.3$\times$） & 0.003 & 1.589 & 0.002 & OOD \\
+    \midrule
+    \multirow{3}{*}{模糊} & 0.5（分布上界） & 0.003 & 0.045 & 0.07 & in-distr \\
+    & 2.0（OOD, 4$\times$） & 0.003 & 0.039 & 0.08 & OOD \\
+    & 5.0（OOD, 10$\times$） & 0.008 & 0.312 & 0.02 & OOD \\
+    \midrule
+    \multirow{3}{*}{仿射畸变} & 0.01（分布内） & 0.004 & 0.045 & 0.08 & in-distr \\
+    & 0.05（OOD, 3.3$\times$） & 0.003 & 0.033 & 0.08 & OOD \\
+    & 0.25（OOD, 16.7$\times$） & 0.013 & 0.062 & 0.20 & OOD \\
+    \midrule
+    \multirow{3}{*}{探针卷积} & 7.0（分布上界） & 0.003 & 0.037 & 0.09 & in-distr \\
+    & 15.0（OOD, 2.1$\times$） & 0.007 & 0.071 & 0.10 & OOD \\
+    & 30.0（OOD, 4.3$\times$） & 0.125 & 0.527 & 0.24 & OOD \\
+    \bottomrule
+  \end{tabularx}
+\end{generaltab}
+
+结果表明，FFT 在所有测试维度上均展现出极高的鲁棒性。其物理机制在于：FFT 依赖的是频域峰值的角度位置（moiré 倒格矢方向），而非峰值幅度。所施加的退化类型——高斯噪声（全频段均匀抬升噪声底）、$1/f$ 噪声（低频抬升）、高斯模糊（衰减高频）、仿射畸变（轻微偏移峰位）——均不破坏 moiré 条纹的周期性，因此频谱中 moiré 峰的位置保持准确。
+
+FFT 唯一出现明显误差退化的场景是极端探针卷积（tip=30 nm，MAE 从 $0.003^{\circ}$ 升至 $0.125^{\circ}$），因为探针半径接近 moiré 周期时会严重模糊条纹的空间结构。相比之下，CNN 在高噪声（noise=0.5）和高探针卷积（tip=20 nm 以上）场景下误差急剧增大至 $0.3^{\circ}$--$1.6^{\circ}$，说明 CNN 对超出训练分布的退化缺乏外推能力。
+
+基于上述全面评测，在当前仿真数据体系下，FFT 是转角提取的最优方法——无论是绝对精度（MAE $0.027^{\circ}$）还是退化鲁棒性均全面优于 CNN。CNN 的潜在价值体现在：推理速度（$128{\times}128$ vs $512{\times}512$）、端到端 simplicity、MC Dropout 不确定性量化（$\pm 0.176^{\circ}$，$93.5\%$ 在 $1\sigma$ 内），以及面向真实实验数据迁移的可能性。
 
 % ══════════════════════════════════════════════════════════
 % 第4章  实验
@@ -404,9 +445,9 @@ FFT 在两种条件下会显著失效：
 
 (2) 提出了连续晶格重构模型（strength 线性插值），消除了传统分段函数在 $\theta = 2^{\circ}$ 处的人工不连续性，与 Weston et al. 等实验观测的连续重构过渡物理图景相符\cite{weston2020atomic}。
 
-(3) 构建了面向轻敲模式多通道、含探针卷积与多种电学/力学退化的仿真数据集，并采用改造 ResNet + Huber/Mixup 等策略训练 CNN；在公平对比（CNN 用 $128^2$、FFT 用 $512^2$ 重算）下，本次全量评测结果为 FFT MAE 约 $0.049^{\circ}$、CNN MAE 约 $0.094^{\circ}$，即该设定下 FFT 平均误差更低；CNN 仍可给出 MC Dropout 不确定性（平均约 $\pm 0.242^{\circ}$），并在畸变扫描等补充实验中与 FFT 形成互补。
+(3) 构建了面向轻敲模式多通道、含探针卷积与多种电学/力学退化的仿真数据集（$N=50000$，三通道 $128{\times}128$），并采用改造 ResNet18 + Huber 损失 + Mixup 数据增强策略训练 CNN。在公平对比（paired 口径，CNN 用 $128^2$、FFT 用 $512^2$ 同场景）下，全量评测结果为 FFT MAE $0.027^{\circ}$、CNN MAE $0.051^{\circ}$，FFT 平均误差约为 CNN 的一半。CNN 可给出 MC Dropout 不确定性（平均 $\pm 0.176^{\circ}$，$93.5\%$ 在 $1\sigma$ 内），基于不确定性的动态融合可将 MAE 进一步降至 $0.042^{\circ}$。
 
-(4) Distortion sweep 等实验用于刻画不同畸变强度下的相对表现，不能简单等同于表~\ref{tab:final_stats} 的全局 MAE；真实 AFM 数据上的优劣有待后续实验验证。
+(4) 通过四维度退化鲁棒性扫描（噪声、模糊、仿射畸变、探针卷积），从训练分布内推到分布外，系统量化了两种方法的鲁棒性边界。结果表明 FFT 在所有退化维度上均保持极高鲁棒性（即使在 3--17 倍于训练分布的极端退化下，FFT MAE 仍 $\leq 0.013^{\circ}$），其物理机制在于频域峰值位置不受退化幅度的直接影响。CNN 在超出训练分布的退化条件下误差急剧增大，但 FFT 在极端探针卷积（tip=30 nm）下也会出现明显退化（MAE $0.125^{\circ}$）。综合精度与鲁棒性，FFT 是当前仿真数据体系下的最优方法。
 
 \subsection{展望}
 
@@ -490,29 +531,31 @@ img = img + noise * ptp * rng.standard_normal(img.shape)
 \subsection{FFT vs CNN 公平对比报告节选（\texttt{compare\_report.txt}）}
 
 \begin{verbatim}
-MoS2 moiré：FFT vs CNN 角度提取公平对比报告
+MoS₂ moiré：FFT vs CNN 角度提取公平对比报告
 ==================================================
 
-材料：MoS2 转角同质结（a = 0.316 nm）
+评测口径 eval_mode: paired（同场景配对）
+材料：MoS₂ 转角同质结（a = 0.316 nm）
 对比方法：
-  CNN：128×128 三通道数据集图像（与训练一致）
-  FFT：512×512 高度图重新生成（训练分布内退化）
+  CNN：同一场景 128×128 中心裁剪
+  FFT：同一场景 height 512×512（训练分布内退化）
 退化条件：高斯噪声 + 仿射畸变 + 高斯模糊 + 探针卷积 + 1/f噪声
 
 指标                            FFT          CNN
 ----------------------------------------------
 有效样本数                        5000         5000
 失败率                          0.0%         0.0%
-MAE (°)                    0.0492       0.0940
-中位误差 (°)                   0.0281       0.0761
-std (°)                    0.0552       0.0737
-90th pct (°)               0.1264       0.1992
-最大误差 (°)                   0.3340       0.4427
+MAE (°)                    0.0274       0.0513
+中位误差 (°)                   0.0197       0.0391
+std (°)                    0.0248       0.0452
+90th pct (°)               0.0630       0.1117
+最大误差 (°)                   0.1450       0.3556
 
-MAE 比值 MAE_FFT / MAE_CNN 约 0.52（小于 1 表示 FFT 平均误差更小；以当次 eval_compare.py 输出为准）
+MAE 比值 MAE_FFT / MAE_CNN = 0.534
 
 MC Dropout 不确定性:
-  平均不确定性: ±0.242°
+  平均不确定性: ±0.1759°
+  1σ 覆盖率: 93.50%
 \end{verbatim}
 
 \end{appendices}

@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-train_cnn.py — MoS₂ moiré 转角 CNN 回归训练（v4：BF16 + torch.compile + 多骨干）
+train_cnn.py — MoS₂ moiré 转角 CNN 回归训练（v5：BF16 + compile + EMA / 角度加权）
 ================================================================================
 
 任务：输入 128×128 MoS₂ moiré 图像，输出转角 θ（度）
 
-v4 新增（RTX 5070 Ti Blackwell 优化）
+v5 新增
+------
+- ``--ema-decay``：参数滑动平均；验证 / ``best_model.pt`` / 测试使用 EMA 权重（0=关闭）
+- ``--angle-loss-weight``：Huber 按归一化标签加权，略缓解高转角端 MAE 偏大（0=普通 Huber）
+
+v4（RTX 5070 Ti Blackwell 优化）
 --------------------------------------
 - BF16 AMP（--bf16）— Blackwell 原生支持，数值更稳定，速度等同 FP16
 - torch.compile 默认启用，可选 mode=reduce-overhead/max-autotune
@@ -38,6 +43,7 @@ v4 新增（RTX 5070 Ti Blackwell 优化）
     python train_cnn.py --eval-only               # 跳过训练，仅测试集 + MC（用 outputs/best_model.pt）
     python train_cnn.py --compile-mode max-autotune  # 最激进编译优化
     python train_cnn.py --no-amp                  # 禁用混合精度
+    python train_cnn.py --ema-decay 0.999 --angle-loss-weight 0.25  # 可选：EMA + 高角加权
 """
 
 from __future__ import annotations
@@ -53,7 +59,6 @@ import time
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 try:
@@ -65,10 +70,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from core.config import THETA_MAX, THETA_MIN  # noqa: E402
 from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
 from core.cnn import (  # noqa: E402
-    THETA_MAX,
-    THETA_MIN,
     build_model,
     compute_fft_channel,
     detect_n_channels,
@@ -79,6 +83,7 @@ from core.io_utils import load_model_checkpoint, load_npz_dataset, state_dict_fr
 from core.seed import set_global_seed, worker_init_fn  # noqa: E402
 from core.augment import get_default_augmentation  # noqa: E402
 from core.metrics import compute_stratified_metrics, generate_evaluation_report  # noqa: E402
+from core.train_utils import ema_update, weighted_huber_loss  # noqa: E402
 
 # ── 默认超参数 ─────────────────────────────────────────────
 DEFAULT_BATCH_SIZE = 512   # RTX 5070 Ti 16 GB：128×128×3 图像轻松跑 512+
@@ -123,7 +128,7 @@ def _dataset_ram_gb(data) -> float:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="MoS₂ moiré CNN 训练 — ResNet-18 角度回归（v2 多通道 + MC Dropout）",
+        description="MoS₂ moiré CNN 训练 — ResNet 角度回归（多通道 + MC Dropout + 可选 EMA）",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, help="训练批次大小")
@@ -171,6 +176,10 @@ def parse_args():
                         help="禁用训练/验证时每个 epoch 的 batch 级 tqdm 进度条")
     parser.add_argument("--eval-only", action="store_true",
                         help="跳过训练：从 output-dir/best_model.pt 加载权重，仅跑测试集与 MC（元数据从 ckpt 读取）")
+    parser.add_argument("--ema-decay", type=float, default=0.0,
+                        help="EMA 滑动平均衰减；0=关闭，建议 0.999–0.9999。开启时验证/保存/测试使用 EMA 权重")
+    parser.add_argument("--angle-loss-weight", type=float, default=0.0,
+                        help="Huber 按归一化标签加权 w=1+coef·target（高 θ 权重更大）；0=普通 Huber")
     return parser.parse_args()
 
 
@@ -261,10 +270,12 @@ class MoireDataset(Dataset):
 # ── 训练工具 ──────────────────────────────────────────────
 
 
-def train_one_epoch(model, loader, criterion, optimizer, device,
+def train_one_epoch(model, loader, optimizer, device,
                     mixup_alpha=0.0, scaler=None, use_amp=False,
                     amp_dtype=torch.float16, add_fft_channel: bool = False,
-                    grad_clip: float = 1.0, progress: bool = False, desc: str = "train"):
+                    grad_clip: float = 1.0, progress: bool = False, desc: str = "train",
+                    huber_delta: float = 0.02, angle_loss_weight: float = 0.0,
+                    ema_model=None, ema_decay: float = 0.0):
     model.train()
     total_loss = 0.0
     it = loader
@@ -285,7 +296,9 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
             preds = model(imgs)
-            loss = criterion(preds, lbls)
+            loss = weighted_huber_loss(
+                preds, lbls, delta=huber_delta, angle_weight=angle_loss_weight,
+            )
 
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -300,6 +313,9 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
+        if ema_model is not None and ema_decay > 0:
+            ema_update(model, ema_model, ema_decay)
+
         total_loss += loss.item() * len(imgs)
         if progress and tqdm is not None and hasattr(it, "set_postfix"):
             it.set_postfix(loss=f"{loss.item():.4f}", refresh=False)
@@ -307,9 +323,10 @@ def train_one_epoch(model, loader, criterion, optimizer, device,
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, use_amp=False,
+def evaluate(model, loader, device, use_amp=False,
              amp_dtype=torch.float16, add_fft_channel: bool = False,
-             progress: bool = False, desc: str = "val"):
+             progress: bool = False, desc: str = "val",
+             huber_delta: float = 0.02, angle_loss_weight: float = 0.0):
     model.eval()
     total_loss = 0.0
     total_mae = 0.0
@@ -323,7 +340,9 @@ def evaluate(model, loader, criterion, device, use_amp=False,
         lbls = lbls.to(device, non_blocking=True).unsqueeze(1)
         with torch.amp.autocast("cuda", enabled=use_amp, dtype=amp_dtype):
             preds = model(imgs)
-            loss = criterion(preds, lbls)
+            loss = weighted_huber_loss(
+                preds, lbls, delta=huber_delta, angle_weight=angle_loss_weight,
+            )
         total_loss += loss.item() * len(imgs)
         preds_deg = preds.float().squeeze(1).clamp(0, 1) * (THETA_MAX - THETA_MIN) + THETA_MIN
         lbls_deg = lbls.squeeze(1) * (THETA_MAX - THETA_MIN) + THETA_MIN
@@ -401,7 +420,7 @@ def main():
     log_png = os.path.join(out_dir, "train_log.png")
 
     print("=" * 60)
-    print("MoS₂ moiré CNN 训练 v4（BF16 + torch.compile + 多骨干）")
+    print("MoS₂ moiré CNN 训练 v5（BF16 + torch.compile + 可选 EMA / 角度加权）")
     print("=" * 60)
 
     device = get_device()
@@ -443,6 +462,10 @@ def main():
             args.arch = str(meta["arch"])
         if meta.get("dropout") is not None:
             args.dropout = float(meta["dropout"])
+        if meta.get("angle_loss_weight") is not None:
+            args.angle_loss_weight = float(meta["angle_loss_weight"])
+        if meta.get("huber_delta") is not None:
+            args.huber_delta = float(meta["huber_delta"])
         if n_ch != base_n_ch + (1 if add_fft else 0):
             add_fft = n_ch > base_n_ch
         print(f"\n--eval-only：将使用 {model_path}")
@@ -451,6 +474,12 @@ def main():
         add_fft = args.fft_channel
         n_ch = base_n_ch + (1 if add_fft else 0)
     print(f"  检测到 {base_n_ch} 通道数据集" + (f" + FFT通道 = {n_ch} 通道输入" if add_fft else ""))
+
+    angle_loss_w = float(args.angle_loss_weight)
+    ema_decay = float(args.ema_decay)
+    if ema_decay < 0 or ema_decay >= 1.0:
+        raise ValueError("--ema-decay 须满足 0 <= decay < 1；0 表示关闭 EMA")
+    ema_active = (not args.eval_only) and ema_decay > 0
 
     amp_dtype = torch.bfloat16 if (use_cuda and args.bf16) else torch.float16
 
@@ -491,6 +520,8 @@ def main():
     print(f"  patience:      {args.patience}")
     print(f"  dropout:       {args.dropout}")
     print(f"  huber_delta:   {args.huber_delta}")
+    print(f"  angle_loss_w:  {angle_loss_w}")
+    print(f"  ema_decay:     {ema_decay}" + ("（验证/保存/测试用 EMA）" if ema_active else ""))
     print(f"  mc_samples:    {args.mc_samples}")
     print(f"  fft_channel:   {add_fft}")
     print(f"  mixup_alpha:   {args.mixup_alpha}")
@@ -549,6 +580,8 @@ def main():
     if use_cuda:
         model = model.to(memory_format=torch.channels_last)
 
+    ema_model = None
+
     if use_compile:
         try:
             model = torch.compile(model, mode=args.compile_mode)
@@ -563,16 +596,27 @@ def main():
     start_epoch = 1
     best_val_loss = float("inf")
     if preloaded_ckpt is not None:
-        model.load_state_dict(state_dict_from_checkpoint(preloaded_ckpt))
+        _tgt = model._orig_mod if hasattr(model, "_orig_mod") else model
+        _tgt.load_state_dict(state_dict_from_checkpoint(preloaded_ckpt))
     elif args.resume:
         print(f"\n从 checkpoint 恢复: {args.resume}")
         ckpt = load_model_checkpoint(args.resume, map_location=device)
-        model.load_state_dict(state_dict_from_checkpoint(ckpt))
+        _tgt = model._orig_mod if hasattr(model, "_orig_mod") else model
+        _tgt.load_state_dict(state_dict_from_checkpoint(ckpt))
         if isinstance(ckpt, dict):
             if "epoch" in ckpt:
                 start_epoch = ckpt["epoch"] + 1
             if "val_loss" in ckpt:
                 best_val_loss = ckpt["val_loss"]
+
+    if not args.eval_only and ema_decay > 0:
+        ema_model = build_model(n_channels=n_ch, dropout=args.dropout, arch=args.arch).to(device)
+        if use_cuda:
+            ema_model = ema_model.to(memory_format=torch.channels_last)
+        # model may be wrapped by torch.compile (_orig_mod. prefix);
+        # unwrap to get clean state_dict for the raw ema_model.
+        _src = model._orig_mod if hasattr(model, "_orig_mod") else model
+        ema_model.load_state_dict(_src.state_dict())
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\n模型参数量: {total_params/1e6:.2f} M  (arch={args.arch})")
@@ -582,7 +626,6 @@ def main():
         print(f"Mixed Precision: AMP ({amp_dtype_name}) 已启用"
               + ("  [无 GradScaler]" if not need_scaler else "  [GradScaler 启用]"))
 
-    criterion = nn.HuberLoss(delta=args.huber_delta)
     train_losses, val_losses, val_maes = [], [], []
 
     if not args.eval_only:
@@ -608,16 +651,20 @@ def main():
             t0 = time.time()
 
             train_loss = train_one_epoch(
-                model, train_loader, criterion, optimizer, device,
+                model, train_loader, optimizer, device,
                 mixup_alpha=args.mixup_alpha,
                 scaler=scaler, use_amp=use_amp, amp_dtype=amp_dtype,
                 add_fft_channel=add_fft, grad_clip=args.grad_clip,
                 progress=show_batch_pb, desc=f"ep{epoch} train",
+                huber_delta=args.huber_delta, angle_loss_weight=angle_loss_w,
+                ema_model=ema_model, ema_decay=ema_decay,
             )
+            val_net = ema_model if (ema_model is not None and ema_decay > 0) else model
             val_loss, val_mae = evaluate(
-                model, val_loader, criterion, device,
+                val_net, val_loader, device,
                 use_amp=use_amp, amp_dtype=amp_dtype, add_fft_channel=add_fft,
                 progress=show_batch_pb, desc=f"ep{epoch} val",
+                huber_delta=args.huber_delta, angle_loss_weight=angle_loss_w,
             )
             scheduler.step()
 
@@ -632,10 +679,12 @@ def main():
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_cnt = 0
+                _save_src = ema_model if (ema_model is not None and ema_decay > 0) else (model._orig_mod if hasattr(model, "_orig_mod") else model)
+                save_sd = _save_src.state_dict()
                 torch.save(
                     {
-                        "model_state_dict": model.state_dict(),
-                        "model_version": "v4",
+                        "model_state_dict": save_sd,
+                        "model_version": "v5",
                         "arch": args.arch,
                         "theta_min": THETA_MIN,
                         "theta_max": THETA_MAX,
@@ -646,6 +695,9 @@ def main():
                         "epoch": epoch,
                         "val_loss": val_loss,
                         "val_mae_deg": val_mae,
+                        "ema_decay": ema_decay,
+                        "angle_loss_weight": angle_loss_w,
+                        "huber_delta": float(args.huber_delta),
                     },
                     model_path,
                 )
@@ -675,13 +727,15 @@ def main():
     if not args.eval_only:
         print(f"\n加载最佳模型: {model_path}")
         ckpt = load_model_checkpoint(model_path, map_location=device)
-        model.load_state_dict(state_dict_from_checkpoint(ckpt))
+        _tgt = model._orig_mod if hasattr(model, "_orig_mod") else model
+        _tgt.load_state_dict(state_dict_from_checkpoint(ckpt))
     else:
         print(f"\n使用已加载的 best_model.pt（--eval-only）")
 
     test_loss, test_mae = evaluate(
-        model, test_loader, criterion, device,
+        model, test_loader, device,
         use_amp=use_amp, amp_dtype=amp_dtype, add_fft_channel=add_fft,
+        huber_delta=args.huber_delta, angle_loss_weight=angle_loss_w,
     )
     print(f"测试集 MAE:  {test_mae:.4f}°")
     print(f"测试集 Loss: {test_loss:.6f}")
@@ -786,7 +840,12 @@ def main():
         print(f"MC Dropout 不确定性: ±{mean_unc:.4f}°")
     print(f"通道数: {n_ch} ({'含FFT' if add_fft else '无FFT'})")
     print(f"架构: conv1=3x3s2, no maxpool, linear output")
-    print(f"训练策略: Huber(δ={args.huber_delta}), Mixup(α={args.mixup_alpha}), Warmup({args.warmup_epochs}ep)+Cosine")
+    ema_note = f", EMA(decay={ema_decay})" if ema_active else ""
+    ang_note = f", angle-weight={angle_loss_w}" if angle_loss_w > 0 else ""
+    print(
+        f"训练策略: Huber(δ={args.huber_delta}){ang_note}, Mixup(α={args.mixup_alpha}), "
+        f"Warmup({args.warmup_epochs}ep)+Cosine{ema_note}"
+    )
     print(f"加速: AMP({amp_dtype_name})={'启用' if use_amp else '禁用'}, "
           f"compile={'启用' if use_compile else '禁用'}, batch_size={args.batch_size}, "
           f"grad_clip={args.grad_clip}")
