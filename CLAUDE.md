@@ -44,7 +44,7 @@ python check_regression.py
 
 ## Git 推送（必须遵守）
 
-本地分支为 `master`，远程分支为 `main`，**禁止使用 HTTPS 推送**（WSL2 网络问题），必须使用 SSH：
+本地分支为 `master`，远程分支为 `main`，请使用 SSH 推送（HTTPS 在 WSL2 下不稳定）：
 
 ```bash
 cd /home/cyy2837192872/tmdc-project
