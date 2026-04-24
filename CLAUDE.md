@@ -17,7 +17,7 @@ python check_regression.py
 - 退出码 0 = 通过（允许 10% 以内的 MAE 恶化）
 - 退出码 1 = 失败（精度退化超限，必须排查原因）
 - 若改进了模型，运行 `python check_regression.py --save-baseline` 更新基准
-- 当前基准 MAE ≤ 0.064°（2025-04-25）
+- 当前基准 MAE ≤ 0.054°（2026-04-25）
 
 **绝对不要做的事：**
 - 不要重新生成数据集后不重新训练就提交
@@ -41,3 +41,14 @@ python check_regression.py
 
 - Python 3.13, PyTorch 2.11, RTX 5070 Ti (WSL2)
 - 虚拟环境：`.venv/`
+
+## Git 推送（必须遵守）
+
+本地分支为 `master`，远程分支为 `main`，**禁止使用 HTTPS 推送**（WSL2 网络问题），必须使用 SSH：
+
+```bash
+cd /home/cyy2837192872/tmdc-project
+git push origin master:main
+```
+
+不要使用 `git push` 或 `git push origin master`，会因分支名不匹配而失败。
