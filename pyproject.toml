@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mos2-moire-cnn"
-version = "0.2.0"
+version = "0.4.0"
 description = "MoS₂ moiré twist angle extraction using CNN and FFT methods"
 readme = "README.md"
 license = {text = "MIT"}

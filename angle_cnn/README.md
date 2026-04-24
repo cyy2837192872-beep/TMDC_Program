@@ -40,7 +40,10 @@ python train_cnn.py --eval-only --mc-samples 30
 # 3) FFT vs CNN 公平对比（需 best_model.pt）
 python eval_compare.py --mc-samples 30
 
-# 4) 论文用合并表（需 train_test_summary.csv 与 compare_summary.csv）
+# 4) 真实 AFM 数据推理
+python inference_real_data.py --input-dir ../data/afm_processed/ --output ../real_results/
+
+# 5) 论文用合并表（需 train_test_summary.csv 与 compare_summary.csv）
 python export_thesis_table.py
 ```
 

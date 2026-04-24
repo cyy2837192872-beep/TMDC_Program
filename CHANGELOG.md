@@ -27,6 +27,34 @@
 
 ---
 
+## [0.4.0] - 2026-04-25
+
+### 新增
+
+- **`inference_real_data.py`**：真实 AFM 数据的端到端推理管线。支持 `.npz` / `.ibw` / `.spm` / `.tiff` / `.png` 输入，同时运行 CNN（含 MC Dropout 不确定性）+ FFT 角度提取 + 自适应融合，输出 CSV 结果和每样本预览图。
+- **`docs/sim_to_real_roadmap.md`**：Sim-to-Real 优化路线图文档。记录当前性能水位、已失败的方向，以及真实数据到来后根据不同结果（FFT fail / CNN fail / 都不行）的三套针对性优化方案。
+- **`tests/test_metrics.py`**：`compute_stratified_metrics` 和 `compute_calibration_metrics` 的 15 个单元测试。
+
+### 变更
+
+- **`train_cnn.py`**：实验证明 `--scale-augment`（RandomZoom）对转角回归有害（MAE 恶化至 0.0987°），已完全移除相关代码。
+- **`check_regression.py`**：退化检测列表新增 `small_angle_mae`、`large_angle_mae` 分层指标。
+- **`core/config.py`**：新增 12 个 `DEFAULT_*_RANGE` 退化参数常量，消除 `dataset_generator.py` 与 `eval_compare.py` 间的常量重复定义。
+- **`core/eval_fft.py`**：从 `eval_compare.py` 抽取 FFT 工具函数（`extract_angle_fft_robust`、`fft_predict_batch_512`），消除 130 行重复代码。
+- **`eval_compare.py`**：移除重复 FFT 函数，改用 `core.eval_fft`；添加残差相关性分析。
+- **`dataset_generator.py`**：退化常量改为从 `core.config` 导入。
+
+### 文档
+
+- **`README.md`**：添加 `inference_real_data.py` 到项目结构和工作流；添加 Sim-to-Real 路线图说明。
+- **`docs/sim_to_real_roadmap.md`**：后续 AI 或协作者的开发路线图（见上）。
+
+### 测试
+
+- 单元测试总数从 67 增至 **82**，涵盖 `core/metrics.py` 的全部分层指标和校准函数。
+
+---
+
 ## [0.3.0] - 2026-04-25
 
 ### 新增

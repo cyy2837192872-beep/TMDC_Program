@@ -47,8 +47,9 @@ tmdc-project/
 │   ├── robustness_sweep.py         # 四维度退化鲁棒性扫描（noise/blur/shear/tip）
 │   ├── check_regression.py         # CNN 精度回归测试（自动比对 baseline）
 │   ├── preprocess_afm_data.py      # 实验 AFM → 推理用 .npz
+│   ├── inference_real_data.py      # 真实 AFM → CNN/FFT/融合 推理管线
 │   ├── outputs/                    # 训练/评估输出（见 .gitignore，默认不提交）
-│   ├── docs/                       # 文献图、AFM 说明、实验模板
+│   ├── docs/                       # 文献图、AFM 说明、实验模板、sim-to-real 路线图
 │   ├── tests/                      # pytest（physics / degrade / moire_sim 等）
 │   └── core/
 │       ├── config.py               # 物理常数、默认 θ 范围、IMG_SIZE / SIM_SIZE
@@ -178,7 +179,23 @@ python export_thesis_table.py
 
 依赖：先运行 `train_cnn.py`（生成 `train_test_summary.csv`）与 `eval_compare.py`（生成 `compare_summary.csv`）。
 
-### 5. 其它评测与工具
+### 5. 真实 AFM 数据推理（sim-to-real）
+
+```bash
+# 预处理后的 .npz 文件
+python inference_real_data.py --input-dir data/afm_processed/ --output real_results/
+
+# 原始 AFM 文件（需 igor2 或 PIL）
+python inference_real_data.py --input-dir data/afm_raw/ --output real_results/ --raw --fov-nm 300
+
+# 单文件推理
+python inference_real_data.py --input sample.npz --output real_results/
+```
+
+同时运行 CNN（MC Dropout 不确定性）+ FFT + 融合（默认 τ=0.01°），输出 CSV 结果和每样本三栏预览图。
+详细优化路线图：`angle_cnn/docs/sim_to_real_roadmap.md`。
+
+### 6. 其它评测与工具
 
 ```bash
 python graded_eval.py --mc-samples 30
@@ -224,6 +241,8 @@ xelatex -interaction=nonstopmode thesis.tex
 | `compare_scatter.png` / `compare_error.png` | 对比图 |
 | `robustness_sweep.png` / `.csv` | 四维度退化鲁棒性扫描 |
 | `tau_sweep.png` | 融合 τ 参数敏感性分析 |
+| `real_results/real_data_results.csv` | 真实 AFM 数据推理结果（CNN + FFT + 融合） |
+| `real_results/preview/*_preview.png` | 真实数据单样本三栏预览图 |
 | `regression_baseline.json` | 回归测试基准指标 |
 | `graded_eval.*` / `distortion_sweep.*` | 分级与畸变扫描结果 |
 
