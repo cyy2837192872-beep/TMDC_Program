@@ -54,7 +54,7 @@ from dataset_generator import (
 )
 
 # 复用 eval_compare 的鲁棒 FFT 和 CNN 推理
-from eval_compare import _extract_angle_fft_robust
+from angle_cnn.core.eval_fft import extract_angle_fft_robust as _extract_angle_fft_robust
 from angle_cnn.core.cnn import predict_with_uncertainty
 
 from angle_cnn.core.fonts import setup_matplotlib_cjk_font
