@@ -527,6 +527,8 @@ if __name__ == "__main__":
         default=0.5,
         help="融合权重 τ：w=σ/(σ+τ)，σ 为 CNN MC 标准差（度）",
     )
+    parser.add_argument("--save-predictions", action="store_true",
+                        help="保存预测数组到 outputs/compare_predictions.npz（供 generate_thesis_figures.py 使用）")
     cli_args = parser.parse_args()
 
     print("=" * 60)
@@ -653,5 +655,19 @@ if __name__ == "__main__":
         print(f"  Fusion MAE: {np.abs(fusion_preds - labels_test).mean():.3f}°")
     if cnn_stds is not None:
         print(f"  CNN 不确定性: ±{cnn_stds.mean():.3f}°")
+
+    if cli_args.save_predictions:
+        pred_save_path = os.path.join(OUT_DIR, "compare_predictions.npz")
+        np.savez_compressed(
+            pred_save_path,
+            labels=labels_test,
+            fft_preds=fft_preds,
+            cnn_preds=cnn_preds,
+            cnn_stds=cnn_stds if cnn_stds is not None else np.array([]),
+            fusion_preds=fusion_preds if fusion_preds is not None else np.array([]),
+            eval_mode=cli_args.eval_mode,
+        )
+        print(f"  预测已保存: {pred_save_path}")
+
     print("=" * 60)
     print("\n下一步：python distortion_sweep.py")

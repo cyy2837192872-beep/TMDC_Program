@@ -13,7 +13,7 @@ generate_thesis_figures.py — 论文用图表自动生成
 
 依赖
 ----
-    - 已运行： train_cnn.py, eval_compare.py, robustness_sweep.py
+    - 需先运行： train_cnn.py, eval_compare.py；图表需 eval_compare.py --save-predictions
     - 输出位于：outputs/（train_test_summary.csv 等）
 
 输出
