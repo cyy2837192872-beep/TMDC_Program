@@ -44,6 +44,8 @@ tmdc-project/
 │   ├── graded_eval.py              # 分级退化下 FFT vs CNN
 │   ├── distortion_sweep.py         # 仿射畸变扫描
 │   ├── analyze_fft_failure.py      # FFT 失效样本分析
+│   ├── robustness_sweep.py         # 四维度退化鲁棒性扫描（noise/blur/shear/tip）
+│   ├── check_regression.py         # CNN 精度回归测试（自动比对 baseline）
 │   ├── preprocess_afm_data.py      # 实验 AFM → 推理用 .npz
 │   ├── outputs/                    # 训练/评估输出（见 .gitignore，默认不提交）
 │   ├── docs/                       # 文献图、AFM 说明、实验模板
@@ -61,6 +63,7 @@ tmdc-project/
 │       ├── dual_stream.py          # 双流实验用
 │       ├── io_utils.py             # npz / checkpoint
 │       ├── io_afm.py               # Cypher .ibw 等（需 igor2）
+│       ├── eval_fft.py             # FFT 角度提取（6 策略重试，从 eval_compare 抽取）
 │       ├── fonts.py                # Matplotlib 中文字体
 │       └── seed.py                 # 可复现种子
 ├── thesis/hust_bachelor_cse/       # 本科论文 LaTeX（xelatex + bibtex）
@@ -112,7 +115,7 @@ cd angle_cnn
 # 默认：50000 样本，3 通道，输出 128×128，仿真网格 --n-sim 默认 512
 python dataset_generator.py
 
-python dataset_generator.py --log-theta          # 小角度更密
+python dataset_generator.py --theta-sampling uniform --seed 42  # 推荐：均匀采样
 python dataset_generator.py --n-sim 256          # 更快、略粗
 python dataset_generator.py --channels 1       # 仅 height
 python dataset_generator.py --samples 20000 --workers 8
@@ -125,24 +128,30 @@ python dataset_generator.py --samples 20000 --workers 8
 ### 2. 训练 CNN（`train_cnn.py` v5）
 
 ```bash
-python train_cnn.py
-python train_cnn.py --bf16
-python train_cnn.py --arch resnet34 --batch-size 512
-python train_cnn.py --fft-channel --bf16
-python train_cnn.py --mc-samples 30
-python train_cnn.py --eval-only                 # 仅评估已有 best_model.pt
-python train_cnn.py --no-compile --no-amp       # 调试
+# 推荐配置（FP16 + GradScaler，禁用 torch.compile，无 EMA）
+python train_cnn.py --no-compile --batch-size 256 --epochs 100 --patience 18 --mc-samples 30 --seed 42
+
+# 可选：启用 SWA
+python train_cnn.py --no-compile --swa --batch-size 256 --mc-samples 30 --seed 42
+
+# 仅评估已有 best_model.pt
+python train_cnn.py --eval-only
 
 # WSL / 低内存环境（OOM 时优先尝试）
-python train_cnn.py --fp16-data --num-workers 0 --batch-size 256 --no-compile
+python train_cnn.py --no-compile --fp16-data --num-workers 0 --batch-size 128
+```
 
-# v5 可选：EMA（验证与 best_model.pt 存 EMA 权重）+ 归一化标签加权 Huber（略强调高 θ）
-python train_cnn.py --ema-decay 0.999 --angle-loss-weight 0.25
+**训练后回归测试**（必须通过）：
+```bash
+python check_regression.py                    # 对比 baseline，exit 0 = 通过
+python check_regression.py --save-baseline    # 更新基准
 ```
 
 详见 `python train_cnn.py --help`。**实验向**：`train_cnn_v2.py` + `core/dual_stream.py`。
 
-**Checkpoint**：`best_model.pt` 除 `model_state_dict` 外可含 `arch`、`n_channels`、`add_fft_channel`、`dropout`、`huber_delta`、`ema_decay`、`angle_loss_weight` 等；下游 `eval_compare.py` 只依赖权重与通道相关字段。
+**Checkpoint**：`best_model.pt` 除 `model_state_dict` 外可含 `arch`、`n_channels`、`add_fft_channel`、`dropout`、`huber_delta` 等；下游 `eval_compare.py` 只依赖权重与通道相关字段。
+
+> **注意**：不建议启用 `--bf16`（尾数精度不足）、`--ema-decay > 0`（BN 同步不稳定）、`torch.compile`（与 BF16/EMA 不兼容）。详见 `CLAUDE.md`。
 
 ### 3. FFT vs CNN 评估（两种口径 + 融合）
 
@@ -213,6 +222,9 @@ xelatex -interaction=nonstopmode thesis.tex
 | `train_test_summary.csv` | 测试集摘要（供 `export_thesis_table.py`） |
 | `compare_report.txt` / `compare_summary.csv` | FFT/CNN（及融合）对比 |
 | `compare_scatter.png` / `compare_error.png` | 对比图 |
+| `robustness_sweep.png` / `.csv` | 四维度退化鲁棒性扫描 |
+| `tau_sweep.png` | 融合 τ 参数敏感性分析 |
+| `regression_baseline.json` | 回归测试基准指标 |
 | `graded_eval.*` / `distortion_sweep.*` | 分级与畸变扫描结果 |
 
 ---
