@@ -1,7 +1,7 @@
 # MoS2 moire CNN / FFT pipeline (Python 3.10+)
 # Core dependencies
-numpy>=1.20,<2.0
-scipy>=1.7,<2.0
+numpy>=1.20
+scipy>=1.7
 # PyTorch 2.6+ 支持 RTX 5070 Ti (Blackwell sm_120) BF16 与 torch.compile
 torch>=2.6,<3.0
 torchvision>=0.21,<1.0

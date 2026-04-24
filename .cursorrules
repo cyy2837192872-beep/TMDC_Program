@@ -1,0 +1,27 @@
+# tmdc-project — MoS₂ 转角同质结角度提取
+
+## 回归测试（必须遵守）
+
+**每次修改 `train_cnn.py` 或 `angle_cnn/core/` 下的任何模块后，必须运行：**
+
+```bash
+cd angle_cnn
+python check_regression.py
+```
+
+- 退出码 0 = 通过（允许 10% 以内的 MAE 恶化）
+- 退出码 1 = 失败（精度退化超限，必须排查原因）
+- 若改进了模型，运行 `python check_regression.py --save-baseline` 更新基准
+- 当前基准 MAE ≤ 0.064°（2025-04-25）
+
+**绝对不要做的事：**
+- 不要重新生成数据集后不重新训练就提交
+- 不要同时改多个变量（数据集 + 训练配置 + 模型架构），应逐个验证
+- 不要忽略 check_regression 的失败结果
+
+## 关键训练参数（不要随意修改）
+
+- `--no-compile`：必须禁用 torch.compile
+- `--ema-decay 0` 或不传：禁用 EMA
+- 不传 `--bf16`：使用 FP16 + GradScaler
+- 数据集：uniform 采样，seed=42，n_sim=512，3 通道

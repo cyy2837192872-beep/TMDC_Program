@@ -20,31 +20,28 @@ from __future__ import annotations
 
 import csv
 import os
-import sys
 
 import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
 
-from core.degrade import apply_affine_distortion, apply_tip_convolution  # noqa: E402
-from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
-from core.io_utils import require_file  # noqa: E402
-from core.config import IMG_SIZE  # noqa: E402
-from core.physics import FIXED_FOV_NM, pixels_per_moire_period  # noqa: E402
-from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
-from core.eval_utils import load_model_from_checkpoint, cnn_predict_single  # noqa: E402
-from moire_pipeline import extract_angle_fft  # noqa: E402
+from angle_cnn.core.degrade import apply_affine_distortion, apply_tip_convolution
+from angle_cnn.core.fonts import setup_matplotlib_cjk_font
+from angle_cnn.core.io_utils import require_file
+from angle_cnn.core.config import IMG_SIZE
+from angle_cnn.core.physics import FIXED_FOV_NM, pixels_per_moire_period
+from angle_cnn.core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire
+from angle_cnn.core.eval_utils import load_model_from_checkpoint, cnn_predict_single
+from moire_pipeline import extract_angle_fft
 
 # Will be set at runtime from checkpoint metadata
 _N_CHANNELS = 1
 _BASE_N_CHANNELS = 1
 _ADD_FFT_CHANNEL = False
 
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 setup_matplotlib_cjk_font()
 

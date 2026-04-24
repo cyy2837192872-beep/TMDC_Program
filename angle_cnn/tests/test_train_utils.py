@@ -2,18 +2,11 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import torch
 import torch.nn as nn
 
-SCRIPT_DIR = Path(__file__).parent.parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from core.cnn import build_model  # noqa: E402
-from core.train_utils import ema_update, weighted_huber_loss  # noqa: E402
+from angle_cnn.core.cnn import build_model
+from angle_cnn.core.train_utils import ema_update, weighted_huber_loss
 
 
 def test_weighted_huber_matches_plain_when_weight_zero():

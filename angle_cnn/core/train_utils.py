@@ -32,8 +32,16 @@ def weighted_huber_loss(
 
 @torch.no_grad()
 def ema_update(online: nn.Module, ema: nn.Module, decay: float) -> None:
-    """In-place EMA: ``ema = decay * ema + (1 - decay) * online`` for all parameters."""
+    """In-place EMA: ``ema = decay * ema + (1 - decay) * online`` for all parameters.
+
+    BatchNorm buffers (running_mean / running_var) are copied directly rather
+    than EMA-averaged, because the online model already maintains them as
+    running estimates.  Without this copy, the EMA model would use the
+    initial values (mean=0, var=1) and produce garbage predictions.
+    """
     d = float(decay)
     one_m = 1.0 - d
     for p_ema, p in zip(ema.parameters(), online.parameters()):
         p_ema.mul_(d).add_(p.detach(), alpha=one_m)
+    for b_ema, b in zip(ema.buffers(), online.buffers()):
+        b_ema.copy_(b)

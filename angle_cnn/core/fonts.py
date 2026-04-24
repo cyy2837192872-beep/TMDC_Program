@@ -1,10 +1,18 @@
-"""Matplotlib CJK font setup with safe fallbacks (no hard dependency on Noto)."""
+"""Matplotlib CJK font setup with safe fallbacks (no hard dependency on Noto).
+
+Importing this module sets the Agg backend once, so individual plotting functions
+do not need to call ``matplotlib.use("Agg")`` themselves.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
 from typing import Iterable, Optional
+
+import matplotlib
+
+matplotlib.use("Agg")
 
 from matplotlib import rcParams
 import matplotlib.font_manager as fm

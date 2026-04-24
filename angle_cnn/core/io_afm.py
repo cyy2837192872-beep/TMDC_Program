@@ -10,7 +10,7 @@ Install the optional reader dependency with::
 
 Typical workflow
 ----------------
->>> from core.io_afm import load_cypher_image, preprocess_afm_image
+>>> from angle_cnn.core.io_afm import load_cypher_image, preprocess_afm_image
 >>> channels = load_cypher_image("scan_001.ibw")
 >>> height = preprocess_afm_image(channels["Height"])
 """

@@ -51,7 +51,7 @@
 
 仿真方面，基于 moiré 倒格矢差模型直接生成 moiré 包络，并引入连续晶格重构模型（strength 线性插值）消除传统分段函数在 $\theta = 2^{\circ}$ 处的不连续性，使小角度三角畴结构与大角度正弦调制之间的过渡与实验观测一致。在此基础上构建了 $5\times10^4$ 样本的仿真数据集，模拟轻敲模式 AFM 三通道（height / phase / amplitude），退化链包含 TITAN~70 探针卷积、仿射畸变、$1/f$ 噪声等 8 种物理退化。
 
-深度学习方面，采用改造 ResNet 骨干（$3{\times}3$ 首层卷积、Huber Loss、Mixup 数据增强）训练 CNN 回归模型，推理阶段通过 MC Dropout 提供不确定性估计。在公平对比评测中（CNN 用 $128{\times}128$ 训练裁剪，FFT 用 $512{\times}512$ 重算高度图），FFT 平均误差更低（MAE $\approx 0.028^{\circ}$ vs.\ CNN $\approx 0.047^{\circ}$），但 CNN 在低分辨率端到端推理、畸变鲁棒性及不确定性量化方面具有不可替代的优势，二者形成互补。
+深度学习方面，采用改造 ResNet 骨干（$3{\times}3$ 首层卷积、Huber Loss、Mixup 数据增强）训练 CNN 回归模型，推理阶段通过 MC Dropout 提供不确定性估计。在公平对比评测中（CNN 用 $128{\times}128$ 训练裁剪，FFT 用 $512{\times}512$ 重算高度图），FFT 平均误差更低（MAE $\approx 0.027^{\circ}$ vs.\ CNN $\approx 0.053^{\circ}$），但 CNN 在低分辨率端到端推理、畸变鲁棒性及不确定性量化方面具有不可替代的优势，二者形成互补。
 
 实验方面已完成 MoS$_2$ 机械剥离与 SiO$_2$/Si 衬底转移。
 
@@ -66,7 +66,7 @@ Twisted two-dimensional materials form moiré superlattices whose physical prope
 
 On the simulation side, moiré envelopes are generated via a reciprocal-space difference construction. A continuous lattice reconstruction model with linear \textit{strength} interpolation is introduced to eliminate the artificial discontinuity at $\theta = 2^{\circ}$ in conventional piecewise models, yielding a smooth transition between triangular domain structures at small angles and sinusoidal modulation at large angles, consistent with experimental observations. A synthetic dataset of $5\times10^4$ multichannel (height / phase / amplitude) AFM-like images at $128{\times}128$ pixels is produced, with an 8-step degradation chain including TITAN~70 probe convolution, affine drift, $1/f$ noise, and other physically motivated distortions.
 
-On the deep-learning side, a modified ResNet backbone ($3{\times}3$ stem convolution, Huber loss, Mixup augmentation) is trained for regression, with MC Dropout providing uncertainty estimates at inference. Under a fair evaluation protocol (CNN on $128{\times}128$ crops, FFT on re-synthesized $512{\times}512$ height maps), FFT achieves a lower MAE ($\approx 0.028^{\circ}$ vs.\ $\approx 0.047^{\circ}$). Nevertheless, CNN offers irreplaceable advantages in end-to-end inference on low-resolution input, robustness to distortions, and built-in uncertainty quantification, making the two methods complementary.
+On the deep-learning side, a modified ResNet backbone ($3{\times}3$ stem convolution, Huber loss, Mixup augmentation) is trained for regression, with MC Dropout providing uncertainty estimates at inference. Under a fair evaluation protocol (CNN on $128{\times}128$ crops, FFT on re-synthesized $512{\times}512$ height maps), FFT achieves a lower MAE ($\approx 0.027^{\circ}$ vs.\ $\approx 0.053^{\circ}$). Nevertheless, CNN offers irreplaceable advantages in end-to-end inference on low-resolution input, robustness to distortions, and built-in uncertainty quantification, making the two methods complementary.
 
 Experimentally, MoS$_2$ exfoliation and transfer to SiO$_2$/Si substrates have been completed.
 
@@ -290,10 +290,10 @@ FFT 在两种条件下会显著失效：
     \toprule
     指标 & FFT (legacy) & FFT (paired) & CNN (legacy) & CNN (paired) \\
     \midrule
-    MAE ($^{\circ}$) & $0.0278$ & $0.0274$ & $0.0516$ & $0.0513$ \\
-    P90 ($^{\circ}$) & $0.0647$ & $0.0630$ & $0.1119$ & $0.1117$ \\
-    最大误差 ($^{\circ}$) & $0.1442$ & $0.1450$ & $0.4183$ & $0.3556$ \\
-    MAE 比值 (FFT/CNN) & $0.539$ & $0.534$ & --- & --- \\
+    MAE ($^{\circ}$) & $0.0278$ & $0.0274$ & $0.0527$ & $0.0528$ \\
+    P90 ($^{\circ}$) & $0.0647$ & $0.0630$ & $0.1124$ & $0.1136$ \\
+    最大误差 ($^{\circ}$) & $0.1442$ & $0.1450$ & $0.3242$ & $0.9188$ \\
+    MAE 比值 (FFT/CNN) & $0.527$ & $0.519$ & --- & --- \\
     \bottomrule
   \end{tabularx}
 \end{generaltab}
@@ -307,20 +307,20 @@ FFT 在两种条件下会显著失效：
     \midrule
     有效样本数 & 5000 & 5000 \\
     失败率 & $0.0\%$ & $0.0\%$ \\
-    MAE ($^{\circ}$) & $0.0274$ & $0.0513$ \\
-    中位误差 ($^{\circ}$) & $0.0197$ & $0.0391$ \\
-    标准差 ($^{\circ}$) & $0.0248$ & $0.0452$ \\
-    90 百分位误差 ($^{\circ}$) & $0.0630$ & $0.1117$ \\
-    最大误差 ($^{\circ}$) & $0.1450$ & $0.3556$ \\
+    MAE ($^{\circ}$) & $0.0274$ & $0.0528$ \\
+    中位误差 ($^{\circ}$) & $0.0197$ & $0.0410$ \\
+    标准差 ($^{\circ}$) & $0.0248$ & $0.0465$ \\
+    90 百分位误差 ($^{\circ}$) & $0.0630$ & $0.1136$ \\
+    最大误差 ($^{\circ}$) & $0.1450$ & $0.9188$ \\
     \midrule
-    MC Dropout 平均不确定度（CNN） & --- & $\pm 0.176^{\circ}$ \\
+    MC Dropout 平均不确定度（CNN） & --- & $\pm 0.196^{\circ}$ \\
     1$\sigma$ 覆盖率（CNN） & --- & $93.5\%$ \\
-    融合 MAE ($^{\circ}$) & \multicolumn{2}{c}{$0.0420$（$\tau = 0.5^{\circ}$）} \\
+    融合 MAE ($^{\circ}$) & \multicolumn{2}{c}{$0.0416$（$\tau = 0.5^{\circ}$）} \\
     \bottomrule
   \end{tabularx}
 \end{generaltab}
 
-在该公平设定下，FFT 的平均误差约为 CNN 的一半（MAE 比值 $0.534$）。这一结果符合预期：仿真数据保留了 moiré 条纹的完整周期性，FFT 的频域峰值检测恰好是物理模型的逆运算，因此在理想条件下具有天然精度优势。CNN 的输入分辨率仅为 $128{\times}128$（16K 像素），频率信息受限，但作为端到端方法仍能达到 $0.051^{\circ}$ 的 MAE。
+在该公平设定下，FFT 的平均误差约为 CNN 的一半（MAE 比值 $0.519$）。这一结果符合预期：仿真数据保留了 moiré 条纹的完整周期性，FFT 的频域峰值检测恰好是物理模型的逆运算，因此在理想条件下具有天然精度优势。CNN 的输入分辨率仅为 $128{\times}128$（16K 像素），频率信息受限，但作为端到端方法仍能达到 $0.053^{\circ}$ 的 MAE。
 
 需要强调的是，上述对比基于仿真数据。真实 AFM 图像可能包含晶界、污染、多层堆叠等非周期性缺陷，这些因素对 FFT 峰值检测的破坏可能远大于对 CNN 的影响——CNN 在训练过程中已见过多种退化模式的联合分布。真实数据上的最终优劣仍需后续实验验证。
 
@@ -445,7 +445,7 @@ FFT 唯一出现明显误差退化的场景是极端探针卷积（tip=30 nm，M
 
 (2) 提出了连续晶格重构模型（strength 线性插值），消除了传统分段函数在 $\theta = 2^{\circ}$ 处的人工不连续性，与 Weston et al. 等实验观测的连续重构过渡物理图景相符\cite{weston2020atomic}。
 
-(3) 构建了面向轻敲模式多通道、含探针卷积与多种电学/力学退化的仿真数据集（$N=50000$，三通道 $128{\times}128$），并采用改造 ResNet18 + Huber 损失 + Mixup 数据增强策略训练 CNN。在公平对比（paired 口径，CNN 用 $128^2$、FFT 用 $512^2$ 同场景）下，全量评测结果为 FFT MAE $0.027^{\circ}$、CNN MAE $0.051^{\circ}$，FFT 平均误差约为 CNN 的一半。CNN 可给出 MC Dropout 不确定性（平均 $\pm 0.176^{\circ}$，$93.5\%$ 在 $1\sigma$ 内），基于不确定性的动态融合可将 MAE 进一步降至 $0.042^{\circ}$。
+(3) 构建了面向轻敲模式多通道、含探针卷积与多种电学/力学退化的仿真数据集（$N=50000$，三通道 $128{\times}128$），并采用改造 ResNet18 + Huber 损失 + Mixup 数据增强策略训练 CNN。在公平对比（paired 口径，CNN 用 $128^2$、FFT 用 $512^2$ 同场景）下，全量评测结果为 FFT MAE $0.027^{\circ}$、CNN MAE $0.053^{\circ}$，FFT 平均误差约为 CNN 的一半。CNN 可给出 MC Dropout 不确定性（平均 $\pm 0.196^{\circ}$，$93.5\%$ 在 $1\sigma$ 内），基于不确定性的动态融合可将 MAE 进一步降至 $0.042^{\circ}$。
 
 (4) 通过四维度退化鲁棒性扫描（噪声、模糊、仿射畸变、探针卷积），从训练分布内推到分布外，系统量化了两种方法的鲁棒性边界。结果表明 FFT 在所有退化维度上均保持极高鲁棒性（即使在 3--17 倍于训练分布的极端退化下，FFT MAE 仍 $\leq 0.013^{\circ}$），其物理机制在于频域峰值位置不受退化幅度的直接影响。CNN 在超出训练分布的退化条件下误差急剧增大，但 FFT 在极端探针卷积（tip=30 nm）下也会出现明显退化（MAE $0.125^{\circ}$）。综合精度与鲁棒性，FFT 是当前仿真数据体系下的最优方法。
 
@@ -545,16 +545,16 @@ MoS₂ moiré：FFT vs CNN 角度提取公平对比报告
 ----------------------------------------------
 有效样本数                        5000         5000
 失败率                          0.0%         0.0%
-MAE (°)                    0.0274       0.0513
-中位误差 (°)                   0.0197       0.0391
-std (°)                    0.0248       0.0452
-90th pct (°)               0.0630       0.1117
-最大误差 (°)                   0.1450       0.3556
+MAE (°)                    0.0274       0.0528
+中位误差 (°)                   0.0197       0.0410
+std (°)                    0.0248       0.0465
+90th pct (°)               0.0630       0.1136
+最大误差 (°)                   0.1450       0.9188
 
-MAE 比值 MAE_FFT / MAE_CNN = 0.534
+MAE 比值 MAE_FFT / MAE_CNN = 0.519
 
 MC Dropout 不确定性:
-  平均不确定性: ±0.1759°
+  平均不确定性: ±0.1963°
   1σ 覆盖率: 93.50%
 \end{verbatim}
 

@@ -37,68 +37,46 @@ eval_compare.py — MoS₂ moiré FFT vs CNN 角度提取公平对比评估（v3
 from __future__ import annotations
 
 import os
-import sys
 import csv
 
 import numpy as np
 import torch
-from scipy.ndimage import gaussian_filter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
 
-from core.degrade import (  # noqa: E402
-    apply_affine_distortion,
-    apply_background_tilt,
-    apply_feedback_ringing,
-    apply_oneoverf_noise,
-    apply_row_noise,
-    apply_scan_direction_offset,
-    apply_tip_convolution,
+from angle_cnn.core.eval_fft import (
+    extract_angle_fft_robust,
+    fft_predict_batch_512,
+    generate_fft_image_512,
 )
-from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
-from core.io_utils import (  # noqa: E402
+from angle_cnn.core.fonts import setup_matplotlib_cjk_font
+from angle_cnn.core.io_utils import (
     load_model_checkpoint,
     load_npz_dataset,
     require_file,
     state_dict_from_checkpoint,
 )
-from core.moire_sim import synthesize_reconstructed_moire  # noqa: E402
-from dataset_generator import (  # noqa: E402
-    DEFAULT_BLUR_RANGE,
-    DEFAULT_NOISE_RANGE,
-    DEFAULT_ONEOVERF_RANGE,
-    DEFAULT_RINGING_RANGE,
-    DEFAULT_ROW_NOISE_RANGE,
-    DEFAULT_SCALE_RANGE,
-    DEFAULT_SCAN_OFFSET_RANGE,
-    DEFAULT_SHEAR_X_RANGE,
-    DEFAULT_SHEAR_Y_RANGE,
-    DEFAULT_TIP_RADIUS_NM,
-    DEFAULT_TIP_RADIUS_RANGE,
-    DEFAULT_TILT_AMP_RANGE,
+from dataset_generator import (
     _subseed,
     generate_sample_paired_cnn_fft,
 )
-from core.config import THETA_MIN, THETA_MAX  # noqa: E402
-from core.physics import A_NM, FIXED_FOV_NM, pixels_per_moire_period  # noqa: E402
-from moire_pipeline import extract_angle_fft  # noqa: E402
-from core.cnn import (  # noqa: E402
+from angle_cnn.core.config import DEFAULT_TIP_RADIUS_RANGE, THETA_MIN, THETA_MAX
+from angle_cnn.core.physics import A_NM, FIXED_FOV_NM
+from angle_cnn.core.cnn import (
     build_model,
     compute_fft_channel,
     detect_n_channels,
     predict_with_uncertainty,
 )
-from core.metrics import (  # noqa: E402
+from angle_cnn.core.metrics import (
     compute_calibration_metrics,
     compute_stratified_metrics,
 )
 
 setup_matplotlib_cjk_font()
 
-import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib import rcParams  # noqa: E402
+import matplotlib.pyplot as plt
+from matplotlib import rcParams
 
 rcParams["axes.unicode_minus"] = False
 
@@ -108,88 +86,6 @@ OUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 DATASET_PATH = os.path.join(DATA_DIR, "moire_dataset.npz")
 MODEL_PATH = os.path.join(OUT_DIR, "best_model.pt")
 
-
-def _generate_fft_image_512(
-    theta_deg: float,
-    rng: np.random.Generator,
-) -> tuple[np.ndarray, float, float]:
-    """Generate a 512×512 height image with training-distribution degradation for FFT.
-
-    Returns (img_512, fov_nm, actual_ppp).
-    """
-    raw, fov_nm = synthesize_reconstructed_moire(theta_deg, FIXED_FOV_NM, n=512)
-    pixel_size_nm = fov_nm / 512
-    actual_ppp = pixels_per_moire_period(512, theta_deg, FIXED_FOV_NM)
-
-    img = raw.copy()
-
-    tilt_amp = rng.uniform(*DEFAULT_TILT_AMP_RANGE)
-    if tilt_amp > 0.01:
-        img = apply_background_tilt(img, tilt_amp, rng.uniform(-1, 1), rng.uniform(-1, 1))
-
-    shear_y = rng.uniform(*DEFAULT_SHEAR_Y_RANGE)
-    shear_x = rng.uniform(*DEFAULT_SHEAR_X_RANGE)
-    scale_x = rng.uniform(*DEFAULT_SCALE_RANGE)
-    scale_y = rng.uniform(*DEFAULT_SCALE_RANGE)
-    if abs(shear_y) > 0.001 or abs(shear_x) > 0.001:
-        img = apply_affine_distortion(img, shear_x, shear_y, scale_x, scale_y)
-
-    tip_r = rng.uniform(*DEFAULT_TIP_RADIUS_RANGE)
-    if tip_r > 0:
-        img = apply_tip_convolution(img, tip_r, pixel_size_nm)
-
-    blur = rng.uniform(*DEFAULT_BLUR_RANGE)
-    if blur > 0.1:
-        img = gaussian_filter(img, sigma=blur)
-
-    scan_offset = rng.uniform(*DEFAULT_SCAN_OFFSET_RANGE)
-    if scan_offset > 0.003:
-        img = apply_scan_direction_offset(img, scan_offset, rng)
-
-    row_noise = rng.uniform(*DEFAULT_ROW_NOISE_RANGE)
-    if row_noise > 0.01:
-        img = apply_row_noise(img, row_noise, rng)
-
-    ringing = rng.uniform(*DEFAULT_RINGING_RANGE)
-    if ringing > 0.005:
-        img = apply_feedback_ringing(img, ringing, rng)
-
-    oneoverf = rng.uniform(*DEFAULT_ONEOVERF_RANGE)
-    if oneoverf > 0.005:
-        img = apply_oneoverf_noise(img, oneoverf, rng.uniform(0.8, 1.5), rng)
-
-    noise = rng.uniform(*DEFAULT_NOISE_RANGE)
-    if noise > 0.01:
-        ptp = img.max() - img.min()
-        img = img + noise * ptp * rng.standard_normal(img.shape)
-
-    img = (img - img.min()) / (img.max() - img.min() + 1e-9)
-    return img.astype(np.float32), fov_nm, actual_ppp
-
-
-def _extract_angle_fft_robust(img_512: np.ndarray, fov_nm: float, actual_ppp: float) -> float:
-    """Robust FFT angle extraction with light retry strategy.
-
-    Strategy:
-    1) default ppp / n_peaks=6
-    2) ppp jitter (±8%)
-    3) widen peak candidates (n_peaks=8)
-    4) mild denoise then retry
-    """
-    candidates = [
-        (actual_ppp, 6, None),
-        (actual_ppp * 0.92, 6, None),
-        (actual_ppp * 1.08, 6, None),
-        (actual_ppp, 8, None),
-        (actual_ppp * 0.92, 8, 0.8),
-        (actual_ppp * 1.08, 8, 0.8),
-    ]
-    for ppp_try, n_peaks, blur_sigma in candidates:
-        img_try = img_512 if blur_sigma is None else gaussian_filter(img_512, sigma=blur_sigma)
-        th, _, _ = extract_angle_fft(img_try, fov_nm=fov_nm, ppp=max(4.0, ppp_try), n_peaks=n_peaks)
-        if th is not None and np.isfinite(th):
-            return float(th)
-    return float("nan")
 
 
 def fusion_predict(
@@ -206,6 +102,77 @@ def fusion_predict(
         cnn_preds,
         w * fft_preds + (1.0 - w) * cnn_preds,
     ).astype(np.float32)
+
+
+def sweep_fusion_tau(
+    fft_preds: np.ndarray,
+    cnn_preds: np.ndarray,
+    cnn_stds: np.ndarray,
+    labels: np.ndarray,
+    tau_min: float = 0.01,
+    tau_max: float = 1.0,
+    n_steps: int = 50,
+) -> dict:
+    """Sweep fusion τ and return optimal value + full sweep data for analysis."""
+    taus = np.logspace(np.log10(tau_min), np.log10(tau_max), n_steps)
+    maes, p95s = [], []
+    best_tau, best_mae = float("nan"), float("inf")
+
+    for tau in taus:
+        fused = fusion_predict(fft_preds, cnn_preds, cnn_stds, unc_scale=float(tau))
+        err = np.abs(fused - labels)
+        mae = float(np.mean(err))
+        p95 = float(np.percentile(err, 95))
+        maes.append(mae)
+        p95s.append(p95)
+        if mae < best_mae:
+            best_mae = mae
+            best_tau = float(tau)
+
+    return {
+        "taus": taus,
+        "maes": np.array(maes, dtype=float),
+        "p95s": np.array(p95s, dtype=float),
+        "best_tau": best_tau,
+        "best_mae": best_mae,
+    }
+
+
+def plot_tau_sweep(sweep_data: dict) -> None:
+    """Plot τ sweep: MAE and P95 vs τ."""
+    taus = sweep_data["taus"]
+    maes = sweep_data["maes"]
+    p95s = sweep_data["p95s"]
+    best_tau = sweep_data["best_tau"]
+    best_mae = sweep_data["best_mae"]
+
+    # Also compute standalone metrics for reference
+    cnn_mae_only = float("nan")  # placeholder, filled by caller context
+    fft_mae_only = float("nan")
+
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    fig.suptitle(r"MoS$_2$ moiré：融合参数 τ 敏感性分析", fontsize=13, fontweight="bold")
+
+    ax1.semilogx(taus, maes, "b-o", lw=2, ms=5, label="Fusion MAE")
+    ax1.axvline(best_tau, color="blue", ls="--", lw=1.5, alpha=0.7,
+                label=f"最优 τ={best_tau:.3f} (MAE={best_mae:.4f}°)")
+    ax1.set_xlabel(r"τ (融合权重参数 — 越大越偏向 FFT)")
+    ax1.set_ylabel("MAE (°)", color="blue")
+    ax1.tick_params(axis="y", labelcolor="blue")
+    ax1.grid(alpha=0.3)
+    ax1.legend(loc="upper left", fontsize=9)
+
+    ax2 = ax1.twinx()
+    ax2.semilogx(taus, p95s, "r--s", lw=1.5, ms=4, alpha=0.7, label="Fusion P95")
+    ax2.set_ylabel("P95 (°)", color="red")
+    ax2.tick_params(axis="y", labelcolor="red")
+    ax2.legend(loc="upper right", fontsize=9)
+
+    plt.tight_layout()
+    path = os.path.join(OUT_DIR, "tau_sweep.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    print(f"  已保存: {path}")
+    plt.close()
 
 
 def cnn_predict(model, images, device, batch_size=64, add_fft_channel=False):
@@ -244,30 +211,6 @@ def cnn_predict_with_uncertainty(model, images, device, batch_size=64,
         all_stds.append(std_deg)
     return np.concatenate(all_means), np.concatenate(all_stds)
 
-
-def fft_predict_batch_512(
-    labels: np.ndarray,
-    seed: int = 12345,
-) -> np.ndarray:
-    """Generate 512×512 images on-the-fly and run FFT extraction.
-
-    This gives FFT a fair chance by providing full-resolution images
-    (matching ``graded_eval.py``), rather than the 128×128 crops stored
-    in the dataset which are too small for reliable FFT peak detection.
-    """
-    n = len(labels)
-    preds = []
-    rng = np.random.default_rng(seed)
-
-    for i in range(n):
-        theta_deg = float(labels[i])
-        img_512, fov_nm, actual_ppp = _generate_fft_image_512(theta_deg, rng)
-        th = _extract_angle_fft_robust(img_512, fov_nm=fov_nm, actual_ppp=actual_ppp)
-        preds.append(th)
-        if (i + 1) % 50 == 0:
-            print(f"  FFT 进度: {i+1}/{n}")
-
-    return np.array(preds, dtype=np.float32)
 
 
 def error_stats(preds, labels, method_name):
@@ -400,6 +343,25 @@ def plot_error_analysis(labels, fft_preds, cnn_preds, fusion_preds=None):
     plt.close()
 
 
+def _residual_correlation(
+    labels: np.ndarray,
+    fft_preds: np.ndarray,
+    cnn_preds: np.ndarray,
+    fft_valid: np.ndarray,
+) -> float:
+    """Pearson correlation between FFT residuals and CNN residuals.
+
+    Near +1 → both methods make errors on the same samples (redundant).
+    Near  0 → errors are uncorrelated (ensemble potential).
+    """
+    mask = fft_valid & np.isfinite(cnn_preds)
+    if mask.sum() < 3:
+        return float("nan")
+    fft_resid = labels[mask] - fft_preds[mask]
+    cnn_resid = labels[mask] - cnn_preds[mask]
+    return float(np.corrcoef(fft_resid, cnn_resid)[0, 1])
+
+
 def save_report(
     labels,
     fft_preds,
@@ -451,6 +413,19 @@ def save_report(
 
         ratio = fft_errors.mean() / cnn_errors.mean()
         f.write(f"MAE 比值 MAE_FFT / MAE_CNN = {ratio:.3f}（<1 表示 FFT 平均误差更小）\n")
+
+        # 残差相关性分析
+        resid_corr = _residual_correlation(labels, fft_preds, cnn_preds, fft_valid)
+        if np.isfinite(resid_corr):
+            f.write(f"\n残差相关性:\n")
+            f.write(f"  FFT vs CNN 残差相关系数: {resid_corr:.4f}\n")
+            _corr_comment = (
+                "（高度正相关 → 两者误差模式相似，融合冗余度高）"
+                if resid_corr > 0.5 else
+                "（弱相关/不相关 → 两者误差互补，融合有潜力）"
+            )
+            f.write(f"  {_corr_comment}\n")
+
         if fusion_preds is not None and fusion_metrics is not None:
             fusion_err = np.abs(fusion_preds - labels)
             f.write(
@@ -508,6 +483,7 @@ def save_report(
         "cnn_small_lt1p5_mae_deg": float(cnn_metrics.small_angle_mae),
         "fft_large_gt3p5_mae_deg": float(fft_metrics.large_angle_mae),
         "cnn_large_gt3p5_mae_deg": float(cnn_metrics.large_angle_mae),
+        "residual_correlation": resid_corr if np.isfinite(resid_corr) else float("nan"),
         "fusion_unc_scale": float(fusion_unc_scale),
     }
     if fusion_preds is not None and fusion_metrics is not None:
@@ -600,7 +576,7 @@ if __name__ == "__main__":
                 n_sim=512,
             )
             paired_list.append(img_cnn)
-            fft_list.append(_extract_angle_fft_robust(h512, fov_nm=fov_nm, actual_ppp=actual_ppp))
+            fft_list.append(extract_angle_fft_robust(h512, fov_nm=fov_nm, actual_ppp=actual_ppp))
             if (i + 1) % 500 == 0:
                 print(f"  paired 进度: {i + 1}/{len(labels_test)}")
         cnn_input = np.stack(paired_list, axis=0)
@@ -640,6 +616,16 @@ if __name__ == "__main__":
             f"\n  融合（τ={cli_args.fusion_unc_scale}°） MAE: "
             f"{np.abs(fusion_preds - labels_test).mean():.4f}°",
         )
+
+        print("\n[2.5] τ 参数扫描（融合敏感性分析）...")
+        sweep_data = sweep_fusion_tau(fft_preds, cnn_preds, cnn_stds, labels_test)
+        print(
+            f"  最优 τ = {sweep_data['best_tau']:.4f}°  "
+            f"(融合 MAE = {sweep_data['best_mae']:.4f}°)"
+        )
+        print(f"  扫描范围: [{sweep_data['taus'][0]:.4f}, {sweep_data['taus'][-1]:.4f}]° "
+              f"共 {len(sweep_data['taus'])} 点")
+        plot_tau_sweep(sweep_data)
 
     print("\n[3] 误差统计:")
     fft_errors, fft_valid = error_stats(fft_preds, labels_test, "FFT")

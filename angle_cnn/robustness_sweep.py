@@ -27,21 +27,18 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import sys
 from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
 
-from core.config import IMG_SIZE, THETA_MAX, THETA_MIN  # noqa: E402
-from core.physics import FIXED_FOV_NM  # noqa: E402
-from core.eval_utils import load_model_from_checkpoint  # noqa: E402
-from core.physics import pixels_per_moire_period  # noqa: E402
-from dataset_generator import (  # noqa: E402
+from angle_cnn.core.config import IMG_SIZE, THETA_MAX, THETA_MIN
+from angle_cnn.core.physics import FIXED_FOV_NM
+from angle_cnn.core.eval_utils import load_model_from_checkpoint
+from angle_cnn.core.physics import pixels_per_moire_period
+from dataset_generator import (
     DEFAULT_BLUR_RANGE,
     DEFAULT_NOISE_RANGE,
     DEFAULT_ONEOVERF_RANGE,
@@ -57,13 +54,13 @@ from dataset_generator import (  # noqa: E402
 )
 
 # 复用 eval_compare 的鲁棒 FFT 和 CNN 推理
-from eval_compare import _extract_angle_fft_robust  # noqa: E402
-from core.cnn import predict_with_uncertainty  # noqa: E402
+from eval_compare import _extract_angle_fft_robust
+from angle_cnn.core.cnn import predict_with_uncertainty
 
-from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
+from angle_cnn.core.fonts import setup_matplotlib_cjk_font
 
 setup_matplotlib_cjk_font()
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 OUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -181,10 +178,10 @@ def run_sweep(
         print(f"{'='*50}")
 
         levels = dim_cfg["levels"]
-        fft_maes, cnn_maes, cnn_stds_all = [], [], []
+        fft_maes, fft128_maes, cnn_maes, cnn_stds_all = [], [], [], []
 
         for li, level in enumerate(levels):
-            fft_errs, cnn_errs = [], []
+            fft_errs, fft128_errs, cnn_errs = [], [], []
             cnn_stds_list = []
 
             for theta in TEST_THETAS:
@@ -202,37 +199,55 @@ def run_sweep(
                         **degrad_kwargs,
                     )
 
-                    # FFT
+                    # FFT-512
                     th_fft = _extract_angle_fft_robust(h512, fov_nm=fov_nm, actual_ppp=actual_ppp)
                     if np.isfinite(th_fft):
                         fft_errs.append(abs(th_fft - theta))
 
+                    # FFT-128: same center crop as CNN
+                    n_sim = 512
+                    oy = (n_sim - IMG_SIZE) // 2
+                    ox = (n_sim - IMG_SIZE) // 2
+                    h128 = h512[oy:oy + IMG_SIZE, ox:ox + IMG_SIZE]
+                    scale = IMG_SIZE / n_sim
+                    fov_128 = fov_nm * scale
+                    ppp_128 = pixels_per_moire_period(IMG_SIZE, theta, fov_128)
+                    th_fft128 = _extract_angle_fft_robust(h128, fov_nm=fov_128, actual_ppp=ppp_128)
+                    if np.isfinite(th_fft128):
+                        fft128_errs.append(abs(th_fft128 - theta))
+
                     # CNN
                     x = torch.from_numpy(img_cnn).unsqueeze(0).float().to(device)
                     if add_fft_channel:
-                        from core.cnn import compute_fft_channel
+                        from angle_cnn.core.cnn import compute_fft_channel
                         x = compute_fft_channel(x)
                     mean_deg, std_deg = predict_with_uncertainty(model, x, n_samples=mc_samples)
                     cnn_errs.append(abs(mean_deg[0] - theta))
                     cnn_stds_list.append(std_deg[0])
 
             fft_mae = float(np.median(fft_errs)) if fft_errs else float("nan")
+            fft128_mae = float(np.median(fft128_errs)) if fft128_errs else float("nan")
             cnn_mae = float(np.median(cnn_errs))
             cnn_std_mean = float(np.mean(cnn_stds_list))
             fft_fail = len(TEST_THETAS) * n_trials - len(fft_errs)
+            fft128_fail = len(TEST_THETAS) * n_trials - len(fft128_errs)
 
             fft_maes.append(fft_mae)
+            fft128_maes.append(fft128_mae)
             cnn_maes.append(cnn_mae)
             cnn_stds_all.append(cnn_std_mean)
 
             status = "OOD" if level > dim_cfg["train_range"][1] else "in-distr"
+            fft128_str = f"FFT128={fft128_mae:.4f}° (fail={fft128_fail})" if not np.isnan(fft128_mae) else "FFT128=fail"
             print(f"  [{li+1}/{len(levels)}] {dim_name}={level:<6}  "
-                  f"FFT={fft_mae:.4f}° (fail={fft_fail})  "
+                  f"FFT512={fft_mae:.4f}° (fail={fft_fail})  "
+                  f"{fft128_str}  "
                   f"CNN={cnn_mae:.4f}°  CNN_std={cnn_std_mean:.4f}°  [{status}]")
 
         results[dim_name] = {
             "levels": levels,
             "fft_mae": fft_maes,
+            "fft128_mae": fft128_maes,
             "cnn_mae": cnn_maes,
             "cnn_std": cnn_stds_all,
             "train_range": dim_cfg["train_range"],
@@ -246,7 +261,7 @@ def plot_sweep(results: Dict[str, dict]) -> None:
     """绘制 4 个退化维度的子图。"""
     fig, axes = plt.subplots(2, 2, figsize=(14, 11))
     fig.suptitle(
-        r"MoS$_2$ moiré：FFT vs CNN 退化鲁棒性边界扫描",
+        r"MoS$_2$ moiré：FFT-512 vs FFT-128 vs CNN 退化鲁棒性边界扫描",
         fontsize=14, fontweight="bold", y=0.98,
     )
 
@@ -254,6 +269,7 @@ def plot_sweep(results: Dict[str, dict]) -> None:
         ax = axes[idx // 2][idx % 2]
         levels = dim_data["levels"]
         fft_mae = np.array(dim_data["fft_mae"])
+        fft128_mae = np.array(dim_data["fft128_mae"])
         cnn_mae = np.array(dim_data["cnn_mae"])
         cnn_std = np.array(dim_data["cnn_std"])
         train_lo, train_hi = dim_data["train_range"]
@@ -264,8 +280,11 @@ def plot_sweep(results: Dict[str, dict]) -> None:
         # 0.1° 基准线
         ax.axhline(0.1, color="red", ls="--", lw=1.2, alpha=0.7, label="0.1° 基准线")
 
-        # FFT
+        # FFT-512
         ax.plot(levels, fft_mae, "o-", color="steelblue", lw=2, ms=6, label="FFT (512px)")
+
+        # FFT-128
+        ax.plot(levels, fft128_mae, "D--", color="lightsteelblue", lw=1.8, ms=5, label="FFT (128px)")
 
         # CNN + 不确定性带
         ax.plot(levels, cnn_mae, "s-", color="darkorange", lw=2, ms=6, label="CNN (128px)")
@@ -295,18 +314,19 @@ def save_csv(results: Dict[str, dict]) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(["dim", "level", "train_lo", "train_hi",
-                         "fft_mae_deg", "cnn_mae_deg", "cnn_mc_std_deg",
-                         "fft_over_cnn_ratio", "is_ood"])
+                         "fft512_mae_deg", "fft128_mae_deg", "cnn_mae_deg", "cnn_mc_std_deg",
+                         "fft512_over_cnn_ratio", "is_ood"])
         for dim_name, dim_data in results.items():
             train_lo, train_hi = dim_data["train_range"]
             for i, level in enumerate(dim_data["levels"]):
                 fft_m = dim_data["fft_mae"][i]
+                fft128_m = dim_data["fft128_mae"][i]
                 cnn_m = dim_data["cnn_mae"][i]
                 cnn_s = dim_data["cnn_std"][i]
                 ratio = fft_m / cnn_m if cnn_m > 1e-9 and np.isfinite(fft_m) else float("nan")
                 is_ood = level > train_hi
                 writer.writerow([dim_name, f"{level:.4f}", f"{train_lo:.4f}", f"{train_hi:.4f}",
-                                 f"{fft_m:.4f}", f"{cnn_m:.4f}", f"{cnn_s:.4f}",
+                                 f"{fft_m:.4f}", f"{fft128_m:.4f}", f"{cnn_m:.4f}", f"{cnn_s:.4f}",
                                  f"{ratio:.3f}", is_ood])
     print(f"  已保存: {path}")
 
@@ -325,7 +345,7 @@ if __name__ == "__main__":
     print(f"每条件: {cli.trials} 次试验, MC Dropout {cli.mc_samples} 采样")
     print()
 
-    from core.io_utils import require_file
+    from angle_cnn.core.io_utils import require_file
     require_file(MODEL_PATH, "Model checkpoint")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -342,16 +362,20 @@ if __name__ == "__main__":
 
     print("\n[汇总]")
     for dim_name, dim_data in results.items():
-        in_distr = [(f, c) for i, (f, c) in enumerate(zip(dim_data["fft_mae"], dim_data["cnn_mae"]))
-                     if not (dim_data["levels"][i] > dim_data["train_range"][1])]
-        ood = [(f, c) for i, (f, c) in enumerate(zip(dim_data["fft_mae"], dim_data["cnn_mae"]))
-               if dim_data["levels"][i] > dim_data["train_range"][1]]
-        in_fft = np.nanmedian([f for f, _ in in_distr]) if in_distr else float("nan")
-        in_cnn = np.nanmedian([c for _, c in in_distr]) if in_distr else float("nan")
-        ood_fft = np.nanmedian([f for f, _ in ood]) if ood else float("nan")
-        ood_cnn = np.nanmedian([c for _, c in ood]) if ood else float("nan")
-        print(f"  {dim_name:6s}  分布内  FFT={in_fft:.4f}°  CNN={in_cnn:.4f}°  |  "
-              f"OOD  FFT={ood_fft:.4f}°  CNN={ood_cnn:.4f}°")
+        in_data = [(dim_data["fft_mae"][i], dim_data["fft128_mae"][i], dim_data["cnn_mae"][i])
+                   for i in range(len(dim_data["levels"]))
+                   if not (dim_data["levels"][i] > dim_data["train_range"][1])]
+        ood_data = [(dim_data["fft_mae"][i], dim_data["fft128_mae"][i], dim_data["cnn_mae"][i])
+                    for i in range(len(dim_data["levels"]))
+                    if dim_data["levels"][i] > dim_data["train_range"][1]]
+        in_fft = np.nanmedian([f for f, _, _ in in_data]) if in_data else float("nan")
+        in_fft128 = np.nanmedian([f128 for _, f128, _ in in_data]) if in_data else float("nan")
+        in_cnn = np.nanmedian([c for _, _, c in in_data]) if in_data else float("nan")
+        ood_fft = np.nanmedian([f for f, _, _ in ood_data]) if ood_data else float("nan")
+        ood_fft128 = np.nanmedian([f128 for _, f128, _ in ood_data]) if ood_data else float("nan")
+        ood_cnn = np.nanmedian([c for _, _, c in ood_data]) if ood_data else float("nan")
+        print(f"  {dim_name:6s}  分布内  FFT512={in_fft:.4f}°  FFT128={in_fft128:.4f}°  CNN={in_cnn:.4f}°  |  "
+              f"OOD  FFT512={ood_fft:.4f}°  FFT128={ood_fft128:.4f}°  CNN={ood_cnn:.4f}°")
 
     plot_sweep(results)
     save_csv(results)

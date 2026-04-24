@@ -67,28 +67,26 @@ except ImportError:
     tqdm = None  # type: ignore[misc, assignment]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
 
-from core.config import THETA_MAX, THETA_MIN  # noqa: E402
-from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
-from core.cnn import (  # noqa: E402
+from angle_cnn.core.config import THETA_MAX, THETA_MIN
+from angle_cnn.core.fonts import setup_matplotlib_cjk_font
+from angle_cnn.core.cnn import (
     build_model,
     compute_fft_channel,
     detect_n_channels,
     predict_with_uncertainty,
     warmup_cosine_lr,
 )
-from core.io_utils import load_model_checkpoint, load_npz_dataset, state_dict_from_checkpoint  # noqa: E402
-from core.seed import set_global_seed, worker_init_fn  # noqa: E402
-from core.augment import get_default_augmentation  # noqa: E402
-from core.metrics import compute_stratified_metrics, generate_evaluation_report  # noqa: E402
-from core.train_utils import ema_update, weighted_huber_loss  # noqa: E402
+from angle_cnn.core.io_utils import load_model_checkpoint, load_npz_dataset, state_dict_from_checkpoint
+from angle_cnn.core.seed import set_global_seed, worker_init_fn
+from angle_cnn.core.augment import get_default_augmentation
+from angle_cnn.core.metrics import compute_stratified_metrics, generate_evaluation_report
+from angle_cnn.core.train_utils import ema_update, weighted_huber_loss
 
 # ── 默认超参数 ─────────────────────────────────────────────
 DEFAULT_BATCH_SIZE = 512   # RTX 5070 Ti 16 GB：128×128×3 图像轻松跑 512+
 DEFAULT_NUM_EPOCHS = 200
-DEFAULT_LR = 1e-3
+DEFAULT_LR = 5e-4
 DEFAULT_WEIGHT_DECAY = 1e-4
 DEFAULT_PATIENCE = 30
 DEFAULT_SEED = 42
@@ -150,7 +148,7 @@ def parse_args():
                         help="添加 FFT magnitude 作为额外输入通道")
     parser.add_argument("--mixup-alpha", type=float, default=0.2,
                         help="Mixup alpha（0 禁用）")
-    parser.add_argument("--warmup-epochs", type=int, default=5,
+    parser.add_argument("--warmup-epochs", type=int, default=8,
                         help="学习率线性预热轮数")
     parser.add_argument("--no-amp", action="store_true",
                         help="禁用 Mixed Precision（AMP）训练")
@@ -178,6 +176,8 @@ def parse_args():
                         help="跳过训练：从 output-dir/best_model.pt 加载权重，仅跑测试集与 MC（元数据从 ckpt 读取）")
     parser.add_argument("--ema-decay", type=float, default=0.0,
                         help="EMA 滑动平均衰减；0=关闭，建议 0.999–0.9999。开启时验证/保存/测试使用 EMA 权重")
+    parser.add_argument("--swa", action="store_true",
+                        help="启用 SWA（Stochastic Weight Averaging），从 50%% epoch 开始平均权重，压制 val loss 震荡")
     parser.add_argument("--angle-loss-weight", type=float, default=0.0,
                         help="Huber 按归一化标签加权 w=1+coef·target（高 θ 权重更大）；0=普通 Huber")
     return parser.parse_args()
@@ -374,8 +374,6 @@ def predict_testset(model, loader, device, use_amp=False, amp_dtype=torch.float1
 def save_log_plot(train_losses, val_losses, val_maes, log_png_path):
     try:
         setup_matplotlib_cjk_font()
-        import matplotlib
-        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
         epochs = range(1, len(train_losses) + 1)
@@ -635,7 +633,16 @@ def main():
             lr_lambda=lambda e: warmup_cosine_lr(e, args.warmup_epochs, args.epochs),
         )
 
-        print(f"\n开始训练（最多 {args.epochs} epoch，早停 patience={args.patience}）")
+        # SWA：从训练后半段开始对权重做滑动平均，压制 val loss 震荡
+        swa_model = None
+        swa_start = args.epochs // 2
+        if args.swa:
+            from torch.optim.swa_utils import AveragedModel, SWALR
+            swa_model = AveragedModel(model)
+            swa_scheduler = SWALR(optimizer, swa_lr=args.lr * 0.1)
+
+        print(f"\n开始训练（最多 {args.epochs} epoch，早停 patience={args.patience})"
+              + (f"，SWA 从 epoch {swa_start} 开始" if args.swa else ""))
         print(f'{"Epoch":>6}  {"Train Loss":>11}  {"Val Loss":>10}  '
               f'{"Val MAE":>9}  {"LR":>9}  {"时间":>6}')
         print("─" * 62)
@@ -667,6 +674,10 @@ def main():
                 huber_delta=args.huber_delta, angle_loss_weight=angle_loss_w,
             )
             scheduler.step()
+            if args.swa and swa_model is not None and epoch >= swa_start:
+                swa_model.update_parameters(model)
+                if swa_scheduler is not None:
+                    swa_scheduler.step()
 
             lr = optimizer.param_groups[0]["lr"]
             dt = time.time() - t0
@@ -720,6 +731,43 @@ def main():
             if patience_cnt >= args.patience:
                 print(f"\n早停触发（{args.patience} epoch val loss 未改善）")
                 break
+
+        # SWA 最终化：用训练集更新 BN 统计量，然后评估
+        if args.swa and swa_model is not None:
+            import torch.optim.swa_utils as swa_utils
+            print(f"\nSWA 最终化：用训练集更新 BN 统计量...")
+            swa_utils.update_bn(train_loader, swa_model, device=device)
+            swa_val_loss, swa_val_mae = evaluate(
+                swa_model, val_loader, device,
+                use_amp=use_amp, amp_dtype=amp_dtype, add_fft_channel=add_fft,
+                huber_delta=args.huber_delta, angle_loss_weight=angle_loss_w,
+            )
+            print(f"  SWA val loss={swa_val_loss:.6f}  val MAE={swa_val_mae:.4f}°")
+            if swa_val_loss < best_val_loss:
+                print(f"  SWA 模型优于 best checkpoint，保存 SWA 权重")
+                best_val_loss = swa_val_loss
+                _save_src = swa_model.module if hasattr(swa_model, "module") else swa_model
+                torch.save(
+                    {
+                        "model_state_dict": _save_src.state_dict(),
+                        "model_version": "v5-swa",
+                        "arch": args.arch,
+                        "theta_min": THETA_MIN,
+                        "theta_max": THETA_MAX,
+                        "n_channels": n_ch,
+                        "base_n_channels": base_n_ch,
+                        "add_fft_channel": add_fft,
+                        "dropout": args.dropout,
+                        "epoch": epoch,
+                        "val_loss": swa_val_loss,
+                        "val_mae_deg": swa_val_mae,
+                        "ema_decay": ema_decay,
+                        "swa": True,
+                        "angle_loss_weight": angle_loss_w,
+                        "huber_delta": float(args.huber_delta),
+                    },
+                    model_path,
+                )
     else:
         print("\n--eval-only：跳过训练，进入测试集与 MC 评估")
 
@@ -845,6 +893,7 @@ def main():
     print(
         f"训练策略: Huber(δ={args.huber_delta}){ang_note}, Mixup(α={args.mixup_alpha}), "
         f"Warmup({args.warmup_epochs}ep)+Cosine{ema_note}"
+        + (", SWA" if args.swa else "")
     )
     print(f"加速: AMP({amp_dtype_name})={'启用' if use_amp else '禁用'}, "
           f"compile={'启用' if use_compile else '禁用'}, batch_size={args.batch_size}, "

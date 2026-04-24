@@ -23,18 +23,9 @@ test_core.py — MoS₂ moiré CNN 核心模块单元测试
 
 from __future__ import annotations
 
-import sys
-import os
-from pathlib import Path
-
 import numpy as np
 import pytest
 import torch
-
-# 添加项目路径
-SCRIPT_DIR = Path(__file__).parent.parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────
@@ -80,7 +71,7 @@ class TestAugmentation:
 
     def test_random_flip_shape(self, sample_image, rng):
         """测试随机翻转保持形状。"""
-        from core.augment import RandomFlip
+        from angle_cnn.core.augment import RandomFlip
 
         flip = RandomFlip()
         result = flip(sample_image, rng)
@@ -89,7 +80,7 @@ class TestAugmentation:
 
     def test_random_rotation90_shape(self, sample_image, rng):
         """测试 90° 旋转保持形状。"""
-        from core.augment import RandomRotation90
+        from angle_cnn.core.augment import RandomRotation90
 
         rot = RandomRotation90()
         result = rot(sample_image, rng)
@@ -98,7 +89,7 @@ class TestAugmentation:
 
     def test_random_zoom_shape(self, sample_image, rng):
         """测试随机缩放输出正确形状。"""
-        from core.augment import RandomZoom
+        from angle_cnn.core.augment import RandomZoom
 
         zoom = RandomZoom(zoom_range=(0.8, 1.2), target_size=128)
         result = zoom(sample_image, rng)
@@ -107,7 +98,7 @@ class TestAugmentation:
 
     def test_random_zoom_multichannel(self, sample_multichannel_image, rng):
         """测试多通道图像缩放。"""
-        from core.augment import RandomZoom
+        from angle_cnn.core.augment import RandomZoom
 
         zoom = RandomZoom(zoom_range=(0.8, 1.2), target_size=128)
         result = zoom(sample_multichannel_image, rng)
@@ -116,7 +107,7 @@ class TestAugmentation:
 
     def test_gaussian_noise_range(self, sample_image, rng):
         """测试高斯噪声输出在有效范围。"""
-        from core.augment import GaussianNoise
+        from angle_cnn.core.augment import GaussianNoise
 
         noise = GaussianNoise(std_range=(0.0, 0.1))
         result = noise(sample_image.clamp(0, 1), rng)
@@ -126,7 +117,7 @@ class TestAugmentation:
 
     def test_compose(self, sample_image, rng):
         """测试组合增强。"""
-        from core.augment import Compose, RandomFlip, RandomRotation90, RandomZoom
+        from angle_cnn.core.augment import Compose, RandomFlip, RandomRotation90, RandomZoom
 
         compose = Compose([
             RandomFlip(),
@@ -139,7 +130,7 @@ class TestAugmentation:
 
     def test_get_default_augmentation(self, sample_image, rng):
         """测试默认增强组合。"""
-        from core.augment import get_default_augmentation
+        from angle_cnn.core.augment import get_default_augmentation
 
         aug = get_default_augmentation(target_size=128)
         result = aug(sample_image, rng)
@@ -154,7 +145,7 @@ class TestMetrics:
 
     def test_stratified_metrics_basic(self, sample_predictions):
         """测试基础分层指标计算。"""
-        from core.metrics import compute_stratified_metrics
+        from angle_cnn.core.metrics import compute_stratified_metrics
 
         predictions, labels, _ = sample_predictions
         metrics = compute_stratified_metrics(predictions, labels)
@@ -166,7 +157,7 @@ class TestMetrics:
 
     def test_stratified_metrics_percentiles(self, sample_predictions):
         """测试百分位误差计算。"""
-        from core.metrics import compute_stratified_metrics
+        from angle_cnn.core.metrics import compute_stratified_metrics
 
         predictions, labels, _ = sample_predictions
         metrics = compute_stratified_metrics(predictions, labels)
@@ -183,7 +174,7 @@ class TestMetrics:
 
     def test_stratified_metrics_angle_bins(self, sample_predictions):
         """测试角度区间分层。"""
-        from core.metrics import compute_stratified_metrics
+        from angle_cnn.core.metrics import compute_stratified_metrics
 
         predictions, labels, _ = sample_predictions
         metrics = compute_stratified_metrics(
@@ -195,7 +186,7 @@ class TestMetrics:
 
     def test_stratified_metrics_with_nan(self, sample_predictions):
         """测试包含 NaN 的预测处理。"""
-        from core.metrics import compute_stratified_metrics
+        from angle_cnn.core.metrics import compute_stratified_metrics
 
         predictions, labels, _ = sample_predictions
         predictions_with_nan = predictions.copy()
@@ -208,7 +199,7 @@ class TestMetrics:
 
     def test_calibration_metrics(self, sample_predictions):
         """测试校准指标计算。"""
-        from core.metrics import compute_calibration_metrics
+        from angle_cnn.core.metrics import compute_calibration_metrics
 
         predictions, labels, uncertainties = sample_predictions
         cal = compute_calibration_metrics(predictions, labels, uncertainties)
@@ -220,7 +211,7 @@ class TestMetrics:
 
     def test_metrics_to_dict(self, sample_predictions):
         """测试指标转字典。"""
-        from core.metrics import compute_stratified_metrics
+        from angle_cnn.core.metrics import compute_stratified_metrics
 
         predictions, labels, _ = sample_predictions
         metrics = compute_stratified_metrics(predictions, labels)
@@ -233,7 +224,7 @@ class TestMetrics:
 
     def test_metrics_summary(self, sample_predictions):
         """测试指标摘要输出。"""
-        from core.metrics import compute_stratified_metrics
+        from angle_cnn.core.metrics import compute_stratified_metrics
 
         predictions, labels, _ = sample_predictions
         metrics = compute_stratified_metrics(predictions, labels)
@@ -251,7 +242,7 @@ class TestDualStream:
 
     def test_fft_feature_extractor_shape(self, sample_batch):
         """测试 FFT 特征提取器输出形状。"""
-        from core.dual_stream import FFTFeatureExtractor
+        from angle_cnn.core.dual_stream import FFTFeatureExtractor
 
         extractor = FFTFeatureExtractor(out_channels=64)
         features = extractor(sample_batch)
@@ -261,7 +252,7 @@ class TestDualStream:
 
     def test_channel_attention_shape(self, sample_batch):
         """测试通道注意力输出形状。"""
-        from core.dual_stream import ChannelAttention
+        from angle_cnn.core.dual_stream import ChannelAttention
 
         attention = ChannelAttention(channels=3)
         result = attention(sample_batch)
@@ -270,7 +261,7 @@ class TestDualStream:
 
     def test_spatial_attention_shape(self, sample_batch):
         """测试空间注意力输出形状。"""
-        from core.dual_stream import SpatialAttention
+        from angle_cnn.core.dual_stream import SpatialAttention
 
         attention = SpatialAttention()
         result = attention(sample_batch)
@@ -279,7 +270,7 @@ class TestDualStream:
 
     def test_feature_fusion_concat(self):
         """测试 concat 融合。"""
-        from core.dual_stream import FeatureFusion
+        from angle_cnn.core.dual_stream import FeatureFusion
 
         fusion = FeatureFusion(
             spatial_channels=64,
@@ -296,7 +287,7 @@ class TestDualStream:
 
     def test_feature_fusion_size_mismatch(self):
         """测试尺寸不匹配时的融合。"""
-        from core.dual_stream import FeatureFusion
+        from angle_cnn.core.dual_stream import FeatureFusion
 
         fusion = FeatureFusion(
             spatial_channels=64,
@@ -313,7 +304,7 @@ class TestDualStream:
 
     def test_dual_stream_net_forward(self, sample_batch):
         """测试双流网络前向传播。"""
-        from core.dual_stream import DualStreamNet
+        from angle_cnn.core.dual_stream import DualStreamNet
 
         model = DualStreamNet(n_channels=3, dropout=0.3, arch="resnet18")
         output = model(sample_batch)
@@ -323,7 +314,7 @@ class TestDualStream:
 
     def test_dual_stream_net_with_attention(self, sample_batch):
         """测试带注意力的双流网络。"""
-        from core.dual_stream import DualStreamNetWithAttention
+        from angle_cnn.core.dual_stream import DualStreamNetWithAttention
 
         model = DualStreamNetWithAttention(n_channels=3, dropout=0.3)
         output = model(sample_batch)
@@ -333,7 +324,7 @@ class TestDualStream:
 
     def test_lightweight_dual_stream_net(self, sample_batch):
         """测试轻量级双流网络。"""
-        from core.dual_stream import LightweightDualStreamNet
+        from angle_cnn.core.dual_stream import LightweightDualStreamNet
 
         model = LightweightDualStreamNet(n_channels=3, dropout=0.3)
         output = model(sample_batch)
@@ -343,7 +334,7 @@ class TestDualStream:
 
     def test_build_dual_stream_model(self):
         """测试模型构建函数。"""
-        from core.dual_stream import build_dual_stream_model
+        from angle_cnn.core.dual_stream import build_dual_stream_model
 
         # 基础模型
         model1 = build_dual_stream_model(n_channels=3, lightweight=False, use_attention=False)
@@ -365,7 +356,7 @@ class TestCNN:
 
     def test_build_model_output_shape(self, sample_batch):
         """测试模型输出形状。"""
-        from core.cnn import build_model
+        from angle_cnn.core.cnn import build_model
 
         model = build_model(n_channels=3, dropout=0.3, arch="resnet18")
         output = model(sample_batch)
@@ -374,7 +365,7 @@ class TestCNN:
 
     def test_build_model_architectures(self):
         """测试不同骨干网络构建。"""
-        from core.cnn import build_model
+        from angle_cnn.core.cnn import build_model
 
         for arch in ["resnet18", "resnet34", "resnet50"]:
             model = build_model(n_channels=3, arch=arch)
@@ -382,7 +373,7 @@ class TestCNN:
 
     def test_compute_fft_channel_shape(self, sample_batch):
         """测试 FFT 通道计算形状。"""
-        from core.cnn import compute_fft_channel
+        from angle_cnn.core.cnn import compute_fft_channel
 
         result = compute_fft_channel(sample_batch)
 
@@ -391,7 +382,7 @@ class TestCNN:
 
     def test_predict_with_uncertainty(self, sample_batch):
         """测试 MC Dropout 推理。"""
-        from core.cnn import build_model, predict_with_uncertainty
+        from angle_cnn.core.cnn import build_model, predict_with_uncertainty
 
         model = build_model(n_channels=3, dropout=0.5)
         model.eval()
@@ -406,7 +397,7 @@ class TestCNN:
 
     def test_warmup_cosine_lr(self):
         """测试学习率调度。"""
-        from core.cnn import warmup_cosine_lr
+        from angle_cnn.core.cnn import warmup_cosine_lr
 
         # Warmup 阶段
         for epoch in range(5):
@@ -425,8 +416,8 @@ class TestIntegration:
 
     def test_full_pipeline(self, sample_batch, tmp_path):
         """测试完整训练-评估流程。"""
-        from core.cnn import build_model, predict_with_uncertainty
-        from core.metrics import compute_stratified_metrics
+        from angle_cnn.core.cnn import build_model, predict_with_uncertainty
+        from angle_cnn.core.metrics import compute_stratified_metrics
 
         # 构建模型
         model = build_model(n_channels=3, dropout=0.3)
@@ -446,7 +437,7 @@ class TestIntegration:
 
     def test_augmentation_preserves_label(self, sample_image, rng):
         """测试增强不改变标签（角度）。"""
-        from core.augment import get_default_augmentation
+        from angle_cnn.core.augment import get_default_augmentation
 
         aug = get_default_augmentation(target_size=128)
         result = aug(sample_image, rng)
@@ -464,7 +455,7 @@ class TestPerformance:
     def test_inference_speed(self, sample_batch):
         """测试推理速度。"""
         import time
-        from core.cnn import build_model
+        from angle_cnn.core.cnn import build_model
 
         model = build_model(n_channels=3, dropout=0.3, arch="resnet18")
         model.eval()
@@ -490,7 +481,7 @@ class TestPerformance:
     def test_dual_stream_inference_speed(self, sample_batch):
         """测试双流网络推理速度。"""
         import time
-        from core.dual_stream import DualStreamNet
+        from angle_cnn.core.dual_stream import DualStreamNet
 
         model = DualStreamNet(n_channels=3, dropout=0.3, arch="resnet18")
         model.eval()

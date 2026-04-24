@@ -18,11 +18,14 @@ metrics.py — MoS₂ moiré CNN 分层评估指标模块
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -299,11 +302,9 @@ def plot_error_distribution(
         方法名称
     """
     try:
-        import matplotlib
-        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
-        print("警告：matplotlib 不可用，跳过绘图")
+        logger.warning("matplotlib 不可用，跳过绘图")
         return
 
     valid = ~np.isnan(predictions) & ~np.isnan(labels)
@@ -394,7 +395,7 @@ def plot_error_distribution(
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"已保存: {save_path}")
+    logger.info("已保存: %s", save_path)
 
 
 def plot_comparison(
@@ -420,11 +421,9 @@ def plot_comparison(
         最大角度
     """
     try:
-        import matplotlib
-        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
-        print("警告：matplotlib 不可用，跳过绘图")
+        logger.warning("matplotlib 不可用，跳过绘图")
         return
 
     n_methods = len(predictions_dict)
@@ -486,7 +485,7 @@ def plot_comparison(
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"已保存: {save_path}")
+    logger.info("已保存: %s", save_path)
 
 
 def generate_evaluation_report(
@@ -554,7 +553,7 @@ def generate_evaluation_report(
             f.write(f"  2σ 覆盖率: {calibration['within_2sigma_pct']:.1f}% (理想 95.4%)\n")
             f.write(f"  误差-不确定性相关系数: {calibration['error_uncertainty_correlation']:.3f}\n")
 
-    print(f"报告已保存: {report_path}")
+    logger.info("报告已保存: %s", report_path)
 
     result = metrics.to_dict()
     if calibration:

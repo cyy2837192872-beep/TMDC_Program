@@ -35,15 +35,9 @@ import numpy as np
 from scipy.ndimage import gaussian_filter, maximum_filter
 import warnings
 import os
-import sys
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPT_DIR)
-
-# Re-export for backward compatibility with existing imports
-from core.config import A_NM, SIM_SIZE as N, DEFAULT_PPP as PPP  # noqa: E402
-from core.physics import moire_period, theta_from_period, angle_uncertainty  # noqa: E402
+from angle_cnn.core.config import A_NM, SIM_SIZE as N, DEFAULT_PPP as PPP
+from angle_cnn.core.physics import moire_period, theta_from_period, angle_uncertainty
 
 OUT = os.path.join(os.path.dirname(__file__), 'outputs')
 
@@ -53,9 +47,7 @@ _font_initialized = False
 def _ensure_font():
     global _font_initialized
     if not _font_initialized:
-        import matplotlib
-        matplotlib.use("Agg")
-        from core.fonts import setup_matplotlib_cjk_font
+        from angle_cnn.core.fonts import setup_matplotlib_cjk_font
         setup_matplotlib_cjk_font()
         _font_initialized = True
 
@@ -90,7 +82,7 @@ def generate_moire(theta_deg, a_nm=A_NM, n=N, ppp=PPP,
     fov_nm : 视野（nm）
     L_nm   : moiré 周期（nm）
     """
-    from core.moire_sim import _compute_moire_fields
+    from angle_cnn.core.moire_sim import _compute_moire_fields
 
     rng = np.random.default_rng(seed)
 

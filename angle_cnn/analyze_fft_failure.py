@@ -13,31 +13,28 @@ analyze_fft_failure.py — 深度分析：为什么原测试集FFT误差高达6.
 from __future__ import annotations
 
 import os
-import sys
 
 import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
 
-from core.degrade import apply_affine_distortion, apply_background_tilt, apply_row_noise
-from core.fonts import setup_matplotlib_cjk_font
-from core.io_utils import load_npz_dataset, require_file
-from core.config import THETA_MIN, THETA_MAX  # noqa: E402
-from core.physics import (  # noqa: E402
+from angle_cnn.core.degrade import apply_affine_distortion, apply_background_tilt, apply_row_noise
+from angle_cnn.core.fonts import setup_matplotlib_cjk_font
+from angle_cnn.core.io_utils import load_npz_dataset, require_file
+from angle_cnn.core.config import THETA_MIN, THETA_MAX
+from angle_cnn.core.physics import (
     A_NM,
     angle_uncertainty,
     moire_period,
     FIXED_FOV_NM,
     pixels_per_moire_period,
 )
-from core.moire_sim import synthesize_reconstructed_moire
+from angle_cnn.core.moire_sim import synthesize_reconstructed_moire
 from moire_pipeline import extract_angle_fft
-from core.cnn import build_model
-from core.eval_utils import load_model_from_checkpoint
+from angle_cnn.core.cnn import build_model
+from angle_cnn.core.eval_utils import load_model_from_checkpoint
 
 setup_matplotlib_cjk_font()
 

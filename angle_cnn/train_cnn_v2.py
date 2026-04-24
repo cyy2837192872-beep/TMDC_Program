@@ -53,11 +53,9 @@ except ImportError:
     tqdm = None  # type: ignore[misc, assignment]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
 
-from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
-from core.cnn import (  # noqa: E402
+from angle_cnn.core.fonts import setup_matplotlib_cjk_font
+from angle_cnn.core.cnn import (
     THETA_MAX,
     THETA_MIN,
     build_model,
@@ -66,11 +64,11 @@ from core.cnn import (  # noqa: E402
     predict_with_uncertainty,
     warmup_cosine_lr,
 )
-from core.io_utils import load_model_checkpoint, load_npz_dataset, state_dict_from_checkpoint  # noqa: E402
-from core.seed import set_global_seed, worker_init_fn  # noqa: E402
-from core.augment import get_default_augmentation, RandomZoom, RandomFlip, RandomRotation90, Compose  # noqa: E402
-from core.metrics import compute_stratified_metrics, generate_evaluation_report, compute_calibration_metrics  # noqa: E402
-from core.dual_stream import build_dual_stream_model  # noqa: E402
+from angle_cnn.core.io_utils import load_model_checkpoint, load_npz_dataset, state_dict_from_checkpoint
+from angle_cnn.core.seed import set_global_seed, worker_init_fn
+from angle_cnn.core.augment import get_default_augmentation, RandomZoom, RandomFlip, RandomRotation90, Compose
+from angle_cnn.core.metrics import compute_stratified_metrics, generate_evaluation_report, compute_calibration_metrics
+from angle_cnn.core.dual_stream import build_dual_stream_model
 
 # ── 默认超参数 ─────────────────────────────────────────────
 DEFAULT_BATCH_SIZE = 512

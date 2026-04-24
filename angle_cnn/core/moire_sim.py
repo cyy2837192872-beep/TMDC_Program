@@ -15,6 +15,7 @@ from scipy.ndimage import gaussian_filter
 from .config import A_NM, SIM_SIZE
 from .physics import moire_period
 
+
 _X_LINSPACE_CACHE: Dict[Tuple[int, int], np.ndarray] = {}
 
 

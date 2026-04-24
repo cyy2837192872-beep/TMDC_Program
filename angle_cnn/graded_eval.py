@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import csv
 import os
-import sys
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -33,10 +32,8 @@ import torch
 from scipy.ndimage import gaussian_filter
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
 
-from core.degrade import (  # noqa: E402
+from angle_cnn.core.degrade import (
     apply_affine_distortion,
     apply_background_tilt,
     apply_feedback_ringing,
@@ -45,18 +42,18 @@ from core.degrade import (  # noqa: E402
     apply_scan_direction_offset,
     apply_tip_convolution,
 )
-from core.fonts import setup_matplotlib_cjk_font  # noqa: E402
-from core.io_utils import require_file  # noqa: E402
-from core.config import IMG_SIZE, THETA_MIN, THETA_MAX  # noqa: E402
-from core.physics import A_NM, angle_uncertainty, FIXED_FOV_NM, pixels_per_moire_period  # noqa: E402
-from core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire  # noqa: E402
-from moire_pipeline import extract_angle_fft  # noqa: E402
-from core.cnn import predict_with_uncertainty  # noqa: E402
-from core.eval_utils import load_model_from_checkpoint, cnn_predict_single  # noqa: E402
+from angle_cnn.core.fonts import setup_matplotlib_cjk_font
+from angle_cnn.core.io_utils import require_file
+from angle_cnn.core.config import IMG_SIZE, THETA_MIN, THETA_MAX
+from angle_cnn.core.physics import A_NM, angle_uncertainty, FIXED_FOV_NM, pixels_per_moire_period
+from angle_cnn.core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire
+from moire_pipeline import extract_angle_fft
+from angle_cnn.core.cnn import predict_with_uncertainty
+from angle_cnn.core.eval_utils import load_model_from_checkpoint, cnn_predict_single
 
 setup_matplotlib_cjk_font()
 
-import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.pyplot as plt
 
 OUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -91,7 +88,10 @@ def generate_test_image(
     rng: np.random.Generator,
     n_channels: int = 1,
 ) -> Tuple[np.ndarray, np.ndarray, float, float]:
-    """Generate a test image pair (CNN input + FFT input)."""
+    """Generate a test image pair (CNN + FFT-512 + FFT-128 inputs).
+
+    Returns (img_cnn, img_512_height, fov_nm, actual_ppp_512, img_128_height, fov_128, actual_ppp_128).
+    """
     if n_channels > 1:
         ch_names = ("height", "phase", "amplitude")[:n_channels]
         ch_dict, fov_nm = synthesize_multichannel_moire(theta_deg, FIXED_FOV_NM, n=512, channels=ch_names)
@@ -99,7 +99,7 @@ def generate_test_image(
         raw, fov_nm = synthesize_reconstructed_moire(theta_deg, FIXED_FOV_NM, n=512)
         ch_dict = {"height": raw}
 
-    actual_ppp = pixels_per_moire_period(512, theta_deg, FIXED_FOV_NM)
+    actual_ppp_512 = pixels_per_moire_period(512, theta_deg, FIXED_FOV_NM)
     pixel_size_nm = fov_nm / 512
 
     # Apply degradations to all channels
@@ -139,10 +139,10 @@ def generate_test_image(
         img = (img - img.min()) / (img.max() - img.min() + 1e-9)
         ch_dict[name] = img.astype(np.float32)
 
-    # FFT input: full 512x512 height
+    # FFT-512: full 512×512 height
     img_512_height = ch_dict["height"]
 
-    # CNN input: center-cropped multi-channel
+    # Center crop for CNN and FFT-128
     n = 512
     oy = (n - IMG_SIZE) // 2
     ox = (n - IMG_SIZE) // 2
@@ -153,7 +153,13 @@ def generate_test_image(
     else:
         img_cnn = ch_dict["height"][oy:oy + IMG_SIZE, ox:ox + IMG_SIZE]
 
-    return img_cnn, img_512_height, fov_nm, actual_ppp
+    # FFT-128: same center crop on height, with scaled FOV
+    img_128_height = ch_dict["height"][oy:oy + IMG_SIZE, ox:ox + IMG_SIZE]
+    scale = IMG_SIZE / 512
+    fov_128 = fov_nm * scale
+    actual_ppp_128 = pixels_per_moire_period(IMG_SIZE, theta_deg, fov_128)
+
+    return img_cnn, img_512_height, fov_nm, actual_ppp_512, img_128_height, fov_128, actual_ppp_128
 
 
 def cnn_predict_with_unc(model, img_cnn, device, mc_samples=30, add_fft_channel=False):
@@ -181,27 +187,37 @@ def run_graded_eval(model, device, n_channels=1, mc_samples=0, add_fft_channel=F
     print()
 
     for level_name, noise, blur, shear_y, tilt, row_noise, oneoverf, ringing, tip_r in DEGRADATION_LEVELS:
-        results[level_name] = {"fft_mae": [], "fft_fail": [], "cnn_mae": [], "cnn_unc": []}
+        results[level_name] = {"fft_mae": [], "fft_fail": [], "fft128_mae": [], "fft128_fail": [],
+                                "cnn_mae": [], "cnn_unc": []}
 
         for theta in TEST_THETAS:
             current += 1
-            fft_errors, cnn_errors, cnn_uncs = [], [], []
-            fft_fail_count = 0
+            fft_errors, fft128_errors, cnn_errors, cnn_uncs = [], [], [], []
+            fft_fail_count, fft128_fail_count = 0, 0
 
             for trial in range(N_TRIALS):
                 seed = hash(f"{level_name}_{theta}_{trial}") % (2 ** 31)
                 rng = np.random.default_rng(seed)
 
-                img_cnn, img_512, fov_nm, actual_ppp = generate_test_image(
+                (img_cnn, img_512, fov_nm, actual_ppp_512,
+                 img_128, fov_128, actual_ppp_128) = generate_test_image(
                     theta, noise, blur, shear_y, tilt, row_noise, oneoverf, ringing, tip_r, rng,
                     n_channels=n_channels,
                 )
 
-                th_fft, _, _ = extract_angle_fft(img_512, fov_nm, ppp=actual_ppp)
+                # FFT-512
+                th_fft, _, _ = extract_angle_fft(img_512, fov_nm, ppp=actual_ppp_512)
                 if th_fft is not None:
                     fft_errors.append(abs(th_fft - theta))
                 else:
                     fft_fail_count += 1
+
+                # FFT-128
+                th_fft128, _, _ = extract_angle_fft(img_128, fov_128, ppp=actual_ppp_128)
+                if th_fft128 is not None:
+                    fft128_errors.append(abs(th_fft128 - theta))
+                else:
+                    fft128_fail_count += 1
 
                 if mc_samples > 0:
                     th_cnn, unc = cnn_predict_with_unc(model, img_cnn, device, mc_samples,
@@ -213,20 +229,29 @@ def run_graded_eval(model, device, n_channels=1, mc_samples=0, add_fft_channel=F
                 cnn_errors.append(abs(th_cnn - theta))
 
             fft_mae = np.mean(fft_errors) if fft_errors else np.nan
+            fft128_mae = np.mean(fft128_errors) if fft128_errors else np.nan
             cnn_mae = np.mean(cnn_errors)
             fft_fail_rate = fft_fail_count / N_TRIALS * 100
+            fft128_fail_rate = fft128_fail_count / N_TRIALS * 100
             mean_unc = np.mean(cnn_uncs) if cnn_uncs else 0.0
 
             results[level_name]["fft_mae"].append(fft_mae)
             results[level_name]["fft_fail"].append(fft_fail_rate)
+            results[level_name]["fft128_mae"].append(fft128_mae)
+            results[level_name]["fft128_fail"].append(fft128_fail_rate)
             results[level_name]["cnn_mae"].append(cnn_mae)
             results[level_name]["cnn_unc"].append(mean_unc)
 
             unc_str = f" unc=±{mean_unc:.3f}°" if mc_samples > 0 else ""
-            ratio_str = f"提升={fft_mae/cnn_mae:.1f}x" if not np.isnan(fft_mae) and cnn_mae > 1e-6 else "FFT失败"
+            fft128_str = f"FFT128={fft128_mae:.3f}° (fail={fft128_fail_rate:.0f}%)" if not np.isnan(fft128_mae) else "FFT128=fail"
+            ratio_str = (
+                f"提升={fft_mae/cnn_mae:.1f}x" if not np.isnan(fft_mae) and cnn_mae > 1e-6
+                else "FFT512=fail" if np.isnan(fft_mae)
+                else "N/A"
+            )
             print(
                 f"  [{current:>2}/{total_configs}] {level_name:8s} θ={theta}°  "
-                f"FFT={fft_mae:.3f}° (fail={fft_fail_rate:.0f}%)  "
+                f"FFT512={fft_mae:.3f}°  {fft128_str}  "
                 f"CNN={cnn_mae:.3f}°{unc_str}  {ratio_str}"
             )
 
@@ -237,11 +262,14 @@ def compute_summary(results):
     summary = []
     for level_name, noise, blur, shear_y, tilt, row_noise, oneoverf, ringing, tip_r in DEGRADATION_LEVELS:
         fft_maes = [x for x in results[level_name]["fft_mae"] if not np.isnan(x)]
+        fft128_maes = [x for x in results[level_name]["fft128_mae"] if not np.isnan(x)]
         cnn_maes = results[level_name]["cnn_mae"]
 
         fft_mae_avg = np.mean(fft_maes) if fft_maes else np.nan
+        fft128_mae_avg = np.mean(fft128_maes) if fft128_maes else np.nan
         cnn_mae_avg = np.mean(cnn_maes)
         fft_fail_avg = np.mean(results[level_name]["fft_fail"])
+        fft128_fail_avg = np.mean(results[level_name]["fft128_fail"])
         cnn_unc_avg = np.mean(results[level_name]["cnn_unc"])
 
         if not np.isnan(fft_mae_avg) and cnn_mae_avg > 1e-6:
@@ -253,6 +281,7 @@ def compute_summary(results):
             "level": level_name,
             "noise": noise, "blur": blur, "shear_y": shear_y, "tip_r": tip_r,
             "fft_mae": fft_mae_avg, "fft_fail": fft_fail_avg,
+            "fft128_mae": fft128_mae_avg, "fft128_fail": fft128_fail_avg,
             "cnn_mae": cnn_mae_avg, "cnn_unc": cnn_unc_avg,
             "improvement": improvement,
         })
@@ -267,51 +296,58 @@ def plot_results(results, summary):
 
     ax = axes[0, 0]
     fft_maes = [s["fft_mae"] for s in summary]
+    fft128_maes = [s["fft128_mae"] for s in summary]
     cnn_maes = [s["cnn_mae"] for s in summary]
-    width = 0.35
-    ax.bar(x - width / 2, fft_maes, width, label="FFT", color="steelblue", alpha=0.8)
-    ax.bar(x + width / 2, cnn_maes, width, label="CNN", color="darkorange", alpha=0.8)
+    width = 0.22
+    ax.bar(x - width, fft_maes, width, label="FFT-512", color="steelblue", alpha=0.8)
+    ax.bar(x, fft128_maes, width, label="FFT-128", color="lightsteelblue", alpha=0.8)
+    ax.bar(x + width, cnn_maes, width, label="CNN-128", color="darkorange", alpha=0.8)
     cnn_uncs = [s["cnn_unc"] for s in summary]
     if any(u > 0 for u in cnn_uncs):
-        ax.errorbar(x + width / 2, cnn_maes, yerr=cnn_uncs, fmt="none", ecolor="red", capsize=3, lw=1.5)
+        ax.errorbar(x + width, cnn_maes, yerr=cnn_uncs, fmt="none", ecolor="red", capsize=3, lw=1.5)
     ax.axhline(0.1, color="red", ls="--", lw=1.5, label="0.1° 基准线")
     ax.set_xlabel("退化级别")
     ax.set_ylabel("MAE (°)")
     ax.set_title("各退化级别下的角度提取误差")
     ax.set_xticks(x)
     ax.set_xticklabels([s.replace("_", "\n") for s in level_names], fontsize=9)
-    ax.legend()
+    ax.legend(fontsize=8)
     ax.grid(axis="y", alpha=0.3)
-    ax.set_ylim(0, max(fft_maes) * 1.1 if any(np.isfinite(fft_maes)) else 1)
+    all_maes = [m for m in fft_maes + fft128_maes if np.isfinite(m)]
+    ax.set_ylim(0, max(all_maes) * 1.1 if all_maes else 1)
 
     ax = axes[0, 1]
     improvements = [s["improvement"] for s in summary]
-    colors = ["mediumseagreen" if not np.isnan(imp) and imp < 20 else "crimson" for imp in improvements]
-    bars = ax.bar(x, improvements, color=colors, alpha=0.8)
+    imp512_colors = ["mediumseagreen" if not np.isnan(imp) and imp < 20 else "crimson" for imp in improvements]
+    ax.bar(x - 0.15, improvements, 0.3, color=imp512_colors, alpha=0.8, label="FFT-512/CNN")
+    imp128 = []
+    for s in summary:
+        f128, c = s["fft128_mae"], s["cnn_mae"]
+        imp128.append(f128 / c if (not np.isnan(f128) and c > 1e-6) else np.nan)
+    imp128_colors = ["steelblue" if not np.isnan(i) and i < 20 else "crimson" for i in imp128]
+    ax.bar(x + 0.15, imp128, 0.3, color=imp128_colors, alpha=0.6, label="FFT-128/CNN")
     ax.axhline(1, color="gray", ls="--", lw=1.2, label="FFT=CNN")
     ax.set_xlabel("退化级别")
     ax.set_ylabel("FFT误差 / CNN误差 (倍)")
     ax.set_title("CNN相对FFT的精度提升倍数")
     ax.set_xticks(x)
     ax.set_xticklabels([s.replace("_", "\n") for s in level_names], fontsize=9)
-    ax.legend()
+    ax.legend(fontsize=7)
     ax.grid(axis="y", alpha=0.3)
-    for bar, imp in zip(bars, improvements):
-        if np.isfinite(imp):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.3,
-                    f"{imp:.1f}x", ha="center", va="bottom", fontsize=9)
 
     ax = axes[1, 0]
     for i, theta in enumerate(TEST_THETAS):
         fft_by_level = [results[level]["fft_mae"][i] for level in level_names]
-        ax.plot(x, fft_by_level, "o-", label=f"θ={theta}°", lw=2, ms=6)
+        ax.plot(x, fft_by_level, "o-", label=f"FFT-512 θ={theta}°", lw=2, ms=6)
+        fft128_by_level = [results[level]["fft128_mae"][i] for level in level_names]
+        ax.plot(x, fft128_by_level, "s--", label=f"FFT-128 θ={theta}°", lw=1.5, ms=5)
     ax.axhline(0.1, color="red", ls="--", lw=1.2)
     ax.set_xlabel("退化级别")
-    ax.set_ylabel("FFT MAE (°)")
-    ax.set_title("FFT在各角度下的表现")
+    ax.set_ylabel("MAE (°)")
+    ax.set_title("FFT-512 vs FFT-128 各角度表现")
     ax.set_xticks(x)
     ax.set_xticklabels([s.replace("_", "\n") for s in level_names], fontsize=9)
-    ax.legend(fontsize=9)
+    ax.legend(fontsize=7)
     ax.grid(alpha=0.3)
     ax.set_ylim(0, None)
 
@@ -344,17 +380,22 @@ def save_csv(summary):
         writer = csv.writer(f)
         writer.writerow([
             "级别", "噪声", "模糊(px)", "剪切(shear_y)", "探针半径(nm)",
-            "FFT_MAE(°)", "FFT失败率(%)", "CNN_MAE(°)", "CNN_unc(°)", "提升倍数",
+            "FFT512_MAE(°)", "FFT512失败率(%)", "FFT128_MAE(°)", "FFT128失败率(%)",
+            "CNN_MAE(°)", "CNN_unc(°)", "提升倍数(FFT512/CNN)", "提升倍数(FFT128/CNN)",
         ])
         for s in summary:
+            imp128_v = s["fft128_mae"] / s["cnn_mae"] if (not np.isnan(s["fft128_mae"]) and s["cnn_mae"] > 1e-6) else np.nan
             writer.writerow([
                 s["level"],
                 f"{s['noise']:.2f}", f"{s['blur']:.1f}", f"{s['shear_y']:.2f}", f"{s['tip_r']:.1f}",
                 f"{s['fft_mae']:.4f}" if np.isfinite(s["fft_mae"]) else "N/A",
                 f"{s['fft_fail']:.1f}",
+                f"{s['fft128_mae']:.4f}" if np.isfinite(s["fft128_mae"]) else "N/A",
+                f"{s['fft128_fail']:.1f}",
                 f"{s['cnn_mae']:.4f}",
                 f"{s['cnn_unc']:.4f}" if s["cnn_unc"] > 0 else "N/A",
                 f"{s['improvement']:.1f}" if np.isfinite(s["improvement"]) else "N/A",
+                f"{imp128_v:.1f}" if np.isfinite(imp128_v) else "N/A",
             ])
     print(f"已保存: {path}")
 
@@ -373,22 +414,25 @@ def save_report(summary):
         f.write(f"每配置测试次数：{N_TRIALS}\n")
         f.write(f"FFT理论不确定度（无畸变）：{unc_theory:.4f}°\n\n")
 
-        f.write("-" * 70 + "\n")
+        f.write("-" * 90 + "\n")
         f.write(f"{'级别':<12} {'噪声':>6} {'模糊':>6} {'剪切':>6} {'探针':>6} "
-                f"{'FFT_MAE':>10} {'CNN_MAE':>10} {'CNN_unc':>10} {'提升':>8}\n")
-        f.write("-" * 70 + "\n")
+                f"{'FFT512':>10} {'FFT128':>10} {'CNN':>10} {'CNN_unc':>10} {'提升':>8}\n")
+        f.write("-" * 90 + "\n")
 
         for s in summary:
             fft_str = f"{s['fft_mae']:.4f}" if np.isfinite(s["fft_mae"]) else "    N/A"
+            fft128_str = f"{s['fft128_mae']:.4f}" if np.isfinite(s["fft128_mae"]) else "    N/A"
             imp_str = f"{s['improvement']:.1f}x" if np.isfinite(s["improvement"]) else "  N/A"
             unc_str = f"±{s['cnn_unc']:.4f}" if s["cnn_unc"] > 0 else "    N/A"
             f.write(f"{s['level']:<12} {s['noise']:>6.2f} {s['blur']:>6.1f} {s['shear_y']:>6.2f} "
-                    f"{s['tip_r']:>6.1f} {fft_str:>10} {s['cnn_mae']:>10.4f} {unc_str:>10} {imp_str:>8}\n")
+                    f"{s['tip_r']:>6.1f} {fft_str:>10} {fft128_str:>10} "
+                    f"{s['cnn_mae']:>10.4f} {unc_str:>10} {imp_str:>8}\n")
 
-        f.write("-" * 70 + "\n\n")
+        f.write("-" * 90 + "\n\n")
         f.write("【实验配置说明】\n\n")
         f.write("退化模型包含 TITAN 70 探针卷积（7 nm tip radius）、1/f噪声、\n")
-        f.write("反馈环路振荡等 Cypher ES Tapping Mode 特有退化。\n\n")
+        f.write("反馈环路振荡等 Cypher ES Tapping Mode 特有退化。\n")
+        f.write("FFT-512：在 512×512 原图上运行；FFT-128：在 128×128 中心裁剪上运行（与 CNN 输入尺寸一致）。\n\n")
 
         ideal = summary[0]
         moderate = summary[3]
@@ -397,17 +441,20 @@ def save_report(summary):
         f.write("【关键发现】\n\n")
         f.write(f"1. 理想图像（无退化，无探针卷积）：\n")
         if np.isfinite(ideal["fft_mae"]):
-            f.write(f"   FFT MAE = {ideal['fft_mae']:.4f}°，CNN MAE = {ideal['cnn_mae']:.4f}°\n")
-            f.write(f"   CNN提升 {ideal['improvement']:.1f}x\n\n")
+            f.write(f"   FFT-512 MAE = {ideal['fft_mae']:.4f}°，FFT-128 MAE = {ideal['fft128_mae']:.4f}°，"
+                    f"CNN MAE = {ideal['cnn_mae']:.4f}°\n")
+            f.write(f"   CNN提升 vs FFT-512: {ideal['improvement']:.1f}x\n\n")
 
         f.write(f"2. 中度退化（含 TITAN 70 探针卷积）：\n")
         if np.isfinite(moderate["fft_mae"]):
-            f.write(f"   FFT MAE = {moderate['fft_mae']:.4f}°，CNN MAE = {moderate['cnn_mae']:.4f}°\n")
-            f.write(f"   CNN提升 {moderate['improvement']:.1f}x\n\n")
+            f.write(f"   FFT-512 MAE = {moderate['fft_mae']:.4f}°，FFT-128 MAE = {moderate['fft128_mae']:.4f}°，"
+                    f"CNN MAE = {moderate['cnn_mae']:.4f}°\n")
+            f.write(f"   CNN提升 vs FFT-512: {moderate['improvement']:.1f}x\n\n")
 
         f.write(f"3. 极端退化：\n")
         if np.isfinite(extreme["fft_mae"]):
-            f.write(f"   FFT MAE = {extreme['fft_mae']:.4f}°，CNN MAE = {extreme['cnn_mae']:.4f}°\n\n")
+            f.write(f"   FFT-512 MAE = {extreme['fft_mae']:.4f}°，FFT-128 MAE = {extreme['fft128_mae']:.4f}°，"
+                    f"CNN MAE = {extreme['cnn_mae']:.4f}°\n\n")
 
     print(f"已保存: {path}")
 
@@ -436,22 +483,23 @@ def main():
 
     summary = compute_summary(results)
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 90)
     print("汇总结果")
-    print("=" * 70)
-    header = f"{'级别':<12} {'FFT_MAE':>10} {'CNN_MAE':>10}"
+    print("=" * 90)
+    header = f"{'级别':<12} {'FFT512':>10} {'FFT128':>10} {'CNN':>10}"
     if args.mc_samples > 0:
         header += f" {'CNN_unc':>10}"
-    header += f" {'提升':>8}"
+    header += f" {'提升(512/CNN)':>14}"
     print(header)
     print("-" * len(header))
     for s in summary:
         fft_str = f"{s['fft_mae']:.4f}" if np.isfinite(s["fft_mae"]) else "    N/A"
+        fft128_str = f"{s['fft128_mae']:.4f}" if np.isfinite(s["fft128_mae"]) else "    N/A"
         imp_str = f"{s['improvement']:.1f}x" if np.isfinite(s["improvement"]) else "  N/A"
-        line = f"{s['level']:<12} {fft_str:>10} {s['cnn_mae']:>10.4f}"
+        line = f"{s['level']:<12} {fft_str:>10} {fft128_str:>10} {s['cnn_mae']:>10.4f}"
         if args.mc_samples > 0:
             line += f" ±{s['cnn_unc']:>9.4f}"
-        line += f" {imp_str:>8}"
+        line += f" {imp_str:>14}"
         print(line)
 
     plot_results(results, summary)

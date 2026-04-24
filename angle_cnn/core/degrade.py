@@ -7,33 +7,25 @@ scan-direction offset).
 
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 from numpy.random import Generator
 from scipy.ndimage import gaussian_filter, map_coordinates
 
 
-_GRID_CACHE: dict[int, tuple[np.ndarray, np.ndarray, float, float]] = {}
-_TILT_CACHE: dict[int, tuple[np.ndarray, np.ndarray]] = {}
-
-
+@functools.lru_cache(maxsize=16)
 def _cached_affine_grid(n: int) -> tuple[np.ndarray, np.ndarray, float, float]:
-    cached = _GRID_CACHE.get(n)
-    if cached is None:
-        yi, xi = np.mgrid[0:n, 0:n]
-        cx, cy = n / 2, n / 2
-        cached = (yi, xi, cx, cy)
-        _GRID_CACHE[n] = cached
-    return cached
+    yi, xi = np.mgrid[0:n, 0:n]
+    cx, cy = n / 2, n / 2
+    return yi, xi, cx, cy
 
 
+@functools.lru_cache(maxsize=16)
 def _cached_tilt_grid(n: int) -> tuple[np.ndarray, np.ndarray]:
-    cached = _TILT_CACHE.get(n)
-    if cached is None:
-        x = np.linspace(0.0, 1.0, n, dtype=np.float32)
-        X, Y = np.meshgrid(x, x)
-        cached = (X, Y)
-        _TILT_CACHE[n] = cached
-    return cached
+    x = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    X, Y = np.meshgrid(x, x)
+    return X, Y
 
 
 

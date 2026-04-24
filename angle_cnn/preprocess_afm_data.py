@@ -35,16 +35,11 @@ import argparse
 import json
 import logging
 import os
-import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
 
 
 @dataclass
@@ -379,8 +374,6 @@ def generate_preview(
 ):
     """生成预览图。"""
     try:
-        import matplotlib
-        matplotlib.use('Agg')
         import matplotlib.pyplot as plt
         
         n_channels = len(channels)
