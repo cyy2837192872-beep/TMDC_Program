@@ -23,7 +23,8 @@ generate_thesis_figures.py — 论文用图表自动生成
         thesis_tab_final_stats.tex      paired 完整误差统计
         thesis_tab_angle_bins.tex       角度分箱 MAE
         thesis_tab_calibration.tex      不确定性校准
-        thesis_tab_robustness.tex       退化鲁棒性扫描
+        thesis_tab_robustness_p1.tex   退化鲁棒性扫描（上）
+        thesis_tab_robustness_p2.tex   退化鲁棒性扫描（下）
         thesis_fig_scatter.png          FFT vs CNN 散点图
         thesis_fig_error_dist.png       误差分布直方图 + 角度分箱
         thesis_fig_angle_bin_mae.png    各角度区间 MAE 对比
@@ -269,15 +270,33 @@ def gen_table_calibration(paired: dict) -> str:
     return "\n".join(rows)
 
 
-def gen_table_robustness(rows_data: list[dict]) -> str:
-    """退化鲁棒性扫描汇总表。"""
+def gen_table_robustness(rows_data: list[dict], dims: list[str] | None = None,
+                         tab_suffix: str = "") -> str:
+    """退化鲁棒性扫描汇总表。
+
+    Parameters
+    ----------
+    rows_data : list[dict]
+        所有维度的鲁棒性数据。
+    dims : list[str] | None
+        要包含的退化维度列表；为 None 则包含全部。
+    tab_suffix : str
+        表标签后缀，用于拆分多表时区分（如 "_p1", "_p2"）。
+    """
     if not rows_data:
         return "% (无鲁棒性数据)"
+    # 过滤维度
+    if dims is not None:
+        rows_data = [r for r in rows_data if r["dim"] in dims]
+    if not rows_data:
+        return "% (无匹配维度的鲁棒性数据)"
     # 按 dim 分组
     from itertools import groupby
     rows_data.sort(key=lambda r: r["dim"])
+    caption = "退化鲁棒性扫描汇总（中位误差，$^\\circ$）"
+    label = f"tab:robustness{tab_suffix}"
     lines = [
-        r"\begin{generaltab}{退化鲁棒性扫描汇总（中位误差，$^\circ$）}{tab:robustness}",
+        r"\begin{generaltab}{" + caption + "}{" + label + "}",
         r"  \begin{tabularx}{\textwidth}{llCCCC}",
         r"    \toprule",
         r"    退化维度 & 级别 & FFT & CNN & FFT/CNN & 状态 \\",
@@ -613,12 +632,19 @@ def main():
     # ── 生成 LaTeX 表格 ──
     print("\n生成 LaTeX 表格...")
 
+    # 鲁棒性表拆分为两个子表（避免 float too large）
+    robust_dims_all = sorted(set(r["dim"] for r in robust))
+    mid = len(robust_dims_all) // 2
+    robust_p1 = robust_dims_all[:mid]
+    robust_p2 = robust_dims_all[mid:]
+
     table_fns = {
         "thesis_tab_eval_modes.tex": gen_table_eval_modes(compare_legacy, compare_paired),
         "thesis_tab_final_stats.tex": gen_table_final_stats(compare_paired),
         "thesis_tab_angle_bins.tex": gen_table_angle_bins(bins),
         "thesis_tab_calibration.tex": gen_table_calibration(compare_paired),
-        "thesis_tab_robustness.tex": gen_table_robustness(robust),
+        "thesis_tab_robustness_p1.tex": gen_table_robustness(robust, dims=robust_p1, tab_suffix="_p1"),
+        "thesis_tab_robustness_p2.tex": gen_table_robustness(robust, dims=robust_p2, tab_suffix="_p2"),
     }
 
     for fname, content in table_fns.items():
