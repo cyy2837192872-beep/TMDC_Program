@@ -297,7 +297,8 @@ def gen_table_robustness(rows_data: list[dict], dims: list[str] | None = None,
     label = f"tab:robustness{tab_suffix}"
     lines = [
         r"\begin{generaltab}{" + caption + "}{" + label + "}",
-        r"  \begin{tabularx}{\textwidth}{llCCCC}",
+        r"  \small",
+        r"  \begin{tabular}{lccccc}",
         r"    \toprule",
         r"    退化维度 & 级别 & FFT & CNN & FFT/CNN & 状态 \\",
         r"    \midrule",
@@ -316,7 +317,7 @@ def gen_table_robustness(rows_data: list[dict], dims: list[str] | None = None,
             level_str = f"{level:.2f}" if level < 1 else f"{level:.1f}"
             if i == 0:
                 lines.append(
-                    f"    \\multirow{{{n_rows}}}{{\\textwidth}}{{{dim_label}}}"
+                    f"    \\multirow{{{n_rows}}}{{*}}{{{dim_label}}}"
                     f" & {level_str} & ${mae_f:.3f}$ & ${mae_c:.3f}$"
                     f" & ${ratio:.2f}$ & {status} \\\\"
                 )
@@ -328,7 +329,7 @@ def gen_table_robustness(rows_data: list[dict], dims: list[str] | None = None,
         lines.append(r"    \midrule")
     lines.extend([
         r"    \bottomrule",
-        r"  \end{tabularx}",
+        r"  \end{tabular}",
         r"\end{generaltab}",
     ])
     return "\n".join(lines)
