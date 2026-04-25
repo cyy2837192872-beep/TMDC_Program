@@ -15,6 +15,7 @@
 \usepackage{siunitx}         % 单位排版，如 \SI{0.316}{nm}
 \usepackage{subcaption}      % 子图
 \usepackage{multirow}        % 表格跨行
+\usepackage{longtable}       % 跨页长表
 \usepackage{booktabs}        % 三线表
 
 % 图片搜索路径（绝对路径，支持从任意目录编译）
@@ -334,14 +335,13 @@ FFT 在两种条件下会显著失效：
 
 \subsection{多维度退化鲁棒性扫描}
 
-为量化两种方法在不同退化条件下的鲁棒性边界，设计了四维退化扫描实验（\texttt{robustness\_sweep.py}）：高斯噪声、高斯模糊、仿射畸变和探针卷积。每种退化从训练分布内逐步推到训练分布外（OOD），固定其他退化参数为训练分布中位数，仅变化目标维度。每个条件在 5 个测试角度（$0.5^{\circ}$--$5.0^{\circ}$）上各重复 10 次试验，CNN 启用 30 次 MC Dropout 采样。结果如图~\ref{fig:robustness_sweep} 和表~\ref{tab:robustness_p1}、\ref{tab:robustness_p2}。
+为量化两种方法在不同退化条件下的鲁棒性边界，设计了四维退化扫描实验（\texttt{robustness\_sweep.py}）：高斯噪声、高斯模糊、仿射畸变和探针卷积。每种退化从训练分布内逐步推到训练分布外（OOD），固定其他退化参数为训练分布中位数，仅变化目标维度。每个条件在 5 个测试角度（$0.5^{\circ}$--$5.0^{\circ}$）上各重复 10 次试验，CNN 启用 30 次 MC Dropout 采样。结果如图~\ref{fig:robustness_sweep} 和表~\ref{tab:robustness}。
 
 \begin{generalfig}[htbp]{FFT vs CNN 多维度退化鲁棒性扫描（灰色区域为训练分布范围）}{fig:robustness_sweep}
   \includegraphics[width=\textwidth]{robustness_sweep.png}
 \end{generalfig}
 
-\input{../../angle_cnn/outputs/thesis/thesis_tab_robustness_p1}
-\input{../../angle_cnn/outputs/thesis/thesis_tab_robustness_p2}
+\input{../../angle_cnn/outputs/thesis/thesis_tab_robustness}
 
 结果表明，FFT 在所有测试维度上均展现出极高的鲁棒性。其物理机制在于：FFT 依赖的是频域峰值的角度位置（moiré 倒格矢方向），而非峰值幅度。所施加的退化类型——高斯噪声（全频段均匀抬升噪声底）、$1/f$ 噪声（低频抬升）、高斯模糊（衰减高频）、仿射畸变（轻微偏移峰位）——均不破坏 moiré 条纹的周期性，因此频谱中 moiré 峰的位置保持准确。
 
