@@ -34,7 +34,7 @@ from angle_cnn.core.config import IMG_SIZE
 from angle_cnn.core.physics import FIXED_FOV_NM, pixels_per_moire_period
 from angle_cnn.core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire
 from angle_cnn.core.eval_utils import load_model_from_checkpoint, cnn_predict_single
-from angle_cnn.moire_pipeline import extract_angle_fft
+from angle_cnn.core.eval_fft import extract_angle_fft_blind
 
 # Will be set at runtime from checkpoint metadata
 _N_CHANNELS = 1
@@ -110,7 +110,7 @@ def make_image(theta_deg, shear, seed, n_channels=1):
 
 
 def run_sweep(model, device, add_fft_channel=False):
-    results = {theta: {"fft": [], "cnn": []} for theta in TEST_THETAS}
+    results = {theta: {"fft": [], "cnn": [], "fft_fail_rate_pct": []} for theta in TEST_THETAS}
     total = len(TEST_THETAS) * len(SHEAR_LEVELS)
     done = 0
 
@@ -124,18 +124,19 @@ def run_sweep(model, device, add_fft_channel=False):
                     theta, shear, seed, n_channels=_BASE_N_CHANNELS
                 )
 
-                th_fft, _, _ = extract_angle_fft(img_512, fov_nm, ppp=actual_ppp)
-                if th_fft is not None:
+                th_fft = extract_angle_fft_blind(img_512, fov_nm)
+                if np.isfinite(th_fft):
                     fft_errs.append(abs(th_fft - theta))
 
                 th_cnn = cnn_predict_single(model, img_128, device, add_fft_channel=add_fft_channel)
                 cnn_errs.append(abs(th_cnn - theta))
 
-            fft_mae = np.median(fft_errs) if fft_errs else np.nan
-            cnn_mae = np.median(cnn_errs)
+            fft_mae = np.mean(fft_errs) if fft_errs else np.nan
+            cnn_mae = np.mean(cnn_errs)
 
             results[theta]["fft"].append(fft_mae)
             results[theta]["cnn"].append(cnn_mae)
+            results[theta]["fft_fail_rate_pct"].append((N_TRIALS - len(fft_errs)) / N_TRIALS * 100)
 
             done += 1
             print(
@@ -182,7 +183,7 @@ def plot_sweep(results):
     ax1.axhline(0.1, color="gray", ls=":", lw=1.5, label="0.1° 基准线")
     ax1.set(
         xlabel="仿射畸变强度 (shear)",
-        ylabel="中位角度误差 (°)",
+        ylabel="MAE (°)",
         title="各角度下误差 vs 畸变强度",
     )
     ax1.legend(fontsize=8, ncol=2, loc="upper left")
@@ -207,14 +208,15 @@ def plot_sweep(results):
     )
     ax2.axhline(1, color="gray", ls="--", lw=1.2, label="FFT = CNN（无优势）")
 
-    peak_idx = int(np.nanargmax(improvement))
-    ax2.annotate(
-        f"峰值 {improvement[peak_idx]:.1f}x\n(shear={SHEAR_LEVELS[peak_idx]:.2f})",
-        xy=(SHEAR_LEVELS[peak_idx], improvement[peak_idx]),
-        xytext=(SHEAR_LEVELS[peak_idx] + 0.02, improvement[peak_idx] * 0.88),
-        arrowprops=dict(arrowstyle="->", color="black"),
-        fontsize=10,
-    )
+    if np.isfinite(improvement).any():
+        peak_idx = int(np.nanargmax(improvement))
+        ax2.annotate(
+            f"峰值 {improvement[peak_idx]:.1f}x\n(shear={SHEAR_LEVELS[peak_idx]:.2f})",
+            xy=(SHEAR_LEVELS[peak_idx], improvement[peak_idx]),
+            xytext=(SHEAR_LEVELS[peak_idx] + 0.02, improvement[peak_idx] * 0.88),
+            arrowprops=dict(arrowstyle="->", color="black"),
+            fontsize=10,
+        )
 
     ax2.set(
         xlabel="仿射畸变强度 (shear)",
@@ -240,7 +242,7 @@ def save_csv(results, improvement):
         writer = csv.writer(f)
         header = ["shear"]
         for t in TEST_THETAS:
-            header += [f"fft_{t}deg", f"cnn_{t}deg"]
+            header += [f"fft_{t}deg_mae", f"cnn_{t}deg_mae", f"fft_{t}deg_fail_rate_pct"]
         header += ["improvement_x"]
         writer.writerow(header)
         for i, shear in enumerate(SHEAR_LEVELS):
@@ -249,6 +251,7 @@ def save_csv(results, improvement):
                 row += [
                     f'{results[t]["fft"][i]:.4f}',
                     f'{results[t]["cnn"][i]:.4f}',
+                    f'{results[t]["fft_fail_rate_pct"][i]:.1f}',
                 ]
             row += [f"{improvement[i]:.2f}"]
             writer.writerow(row)

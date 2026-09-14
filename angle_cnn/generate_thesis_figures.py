@@ -279,19 +279,19 @@ def gen_table_robustness(rows_data: list[dict]) -> str:
         return "% (无鲁棒性数据)"
     from itertools import groupby
     rows_data.sort(key=lambda r: r["dim"])
-    caption = "退化鲁棒性扫描汇总（中位误差，$^\\circ$）"
+    caption = "退化鲁棒性扫描汇总（MAE，$^\\circ$；失败样本另列）"
     lines = [
         r"\begin{center}",
         r"\small",
-        r"\begin{longtable}{lccccc}",
-        r"\caption{退化鲁棒性扫描汇总（中位误差，$^\circ$）}\label{tab:robustness}\\",
+        r"\begin{longtable}{lcccccc}",
+        r"\caption{退化鲁棒性扫描汇总（MAE，$^\circ$；失败样本另列）}\label{tab:robustness}\\",
         r"\toprule",
-        r"退化维度 & 级别 & FFT & CNN & FFT/CNN & 状态 \\",
+        r"退化维度 & 级别 & FFT & CNN & FFT失败率 & FFT/CNN & 状态 \\",
         r"\midrule",
         r"\endfirsthead",
-        r"\multicolumn{6}{c}{\small 续表}\\",
+        r"\multicolumn{7}{c}{\small 续表}\\",
         r"\toprule",
-        r"退化维度 & 级别 & FFT & CNN & FFT/CNN & 状态 \\",
+        r"退化维度 & 级别 & FFT & CNN & FFT失败率 & FFT/CNN & 状态 \\",
         r"\midrule",
         r"\endhead",
         r"\bottomrule",
@@ -303,22 +303,25 @@ def gen_table_robustness(rows_data: list[dict]) -> str:
         dim_label = dim
         for i, r in enumerate(grp):
             level = float(r["level"])
-            mae_f = _num(r.get("fft512_mae_deg", "0"))
-            mae_c = _num(r.get("cnn_mae_deg", "0"))
-            ratio = mae_f / max(mae_c, 1e-9)
+            fail_pct = _num(r["fft512_fail_rate_pct"])
+            mae_f = None if fail_pct == 100 else _num(r["fft512_mae_deg"])
+            mae_c = _num(r["cnn_mae_deg"])
+            ratio = mae_f / max(mae_c, 1e-9) if mae_f is not None else None
+            fft_text = "---" if mae_f is None else f"${mae_f:.3f}$"
+            ratio_text = "---" if ratio is None else f"${ratio:.2f}$"
             is_ood = r.get("is_ood", "False").strip().lower() == "true"
             status = "OOD" if is_ood else "in-distr"
             level_str = f"{level:.2f}" if level < 1 else f"{level:.1f}"
             if i == 0:
                 lines.append(
                     f"\\multirow{{{n_rows}}}{{*}}{{{dim_label}}}"
-                    f" & {level_str} & ${mae_f:.3f}$ & ${mae_c:.3f}$"
-                    f" & ${ratio:.2f}$ & {status} \\\\"
+                    f" & {level_str} & {fft_text} & ${mae_c:.3f}$"
+                    f" & ${fail_pct:.1f}\\%$ & {ratio_text} & {status} \\\\"
                 )
             else:
                 lines.append(
-                    f" & {level_str} & ${mae_f:.3f}$ & ${mae_c:.3f}$"
-                    f" & ${ratio:.2f}$ & {status} \\\\"
+                    f" & {level_str} & {fft_text} & ${mae_c:.3f}$"
+                    f" & ${fail_pct:.1f}\\%$ & {ratio_text} & {status} \\\\"
                 )
         lines.append(r"\midrule")
     # 替换最后一个 \midrule 为 \bottomrule 并收尾
@@ -603,11 +606,16 @@ def main():
     if not _parse_angle_bins(report):
         raise ValueError("paired 评估报告缺少角度分箱数据")
     for row in robust:
-        for key in ("dim", "level", "fft512_mae_deg", "cnn_mae_deg", "is_ood"):
+        for key in ("dim", "level", "fft512_mae_deg", "cnn_mae_deg",
+                    "fft512_fail_rate_pct", "fft_period_prior", "is_ood"):
             if key not in row or row[key] == "":
                 raise ValueError(f"鲁棒性结果缺少 {key}")
-        for key in ("level", "fft512_mae_deg", "cnn_mae_deg"):
+        for key in ("level", "cnn_mae_deg", "fft512_fail_rate_pct"):
             _num(row[key])
+        if row["fft_period_prior"] != "none":
+            raise ValueError("鲁棒性评估的 FFT 使用了标签先验；请重新运行盲 FFT 扫描")
+        if _num(row["fft512_fail_rate_pct"]) != 100:
+            _num(row["fft512_mae_deg"])
 
     # 解析角度分箱
     bins = _parse_angle_bins(report)

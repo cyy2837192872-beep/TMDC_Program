@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
+from angle_cnn.core.afm_preprocess import TRAIN_CROP_FOV_NM
 
 
 @dataclass
@@ -47,6 +48,7 @@ class AFMMetadata:
     """AFM 图像元数据。"""
     filename: str
     scan_size_nm: float = 0.0
+    cnn_crop_fov_nm: float = TRAIN_CROP_FOV_NM
     resolution: Tuple[int, int] = (0, 0)
     scan_rate_hz: float = 0.0
     probe_type: str = ""
@@ -335,7 +337,7 @@ def preprocess_afm_dataset(
     if target_size != 128:
         raise ValueError("current checkpoints require a 128-pixel CNN crop")
     from angle_cnn.core.afm_preprocess import prepare_afm_channels
-    image, _ = prepare_afm_channels(channels, metadata.scan_size_nm)
+    image, _ = prepare_afm_channels(channels, metadata.scan_size_nm, metadata.cnn_crop_fov_nm)
     meta_dict = asdict(metadata)
     
     return image, meta_dict
@@ -379,6 +381,7 @@ def process_single_file(
     target_size: int = 128,
     preview: bool = False,
     fov_nm: float | None = None,
+    crop_fov_nm: float = TRAIN_CROP_FOV_NM,
 ) -> Optional[str]:
     """处理单个 AFM 文件。
     
@@ -397,6 +400,7 @@ def process_single_file(
         return None
     if fov_nm is not None:
         metadata.scan_size_nm = fov_nm
+    metadata.cnn_crop_fov_nm = crop_fov_nm
     
     print(f"  加载成功：{len(channels)} 个通道，分辨率 {metadata.resolution}")
     print(f"  通道：{list(channels.keys())}")
@@ -415,7 +419,7 @@ def process_single_file(
     try:
         image, meta_dict = preprocess_afm_dataset(channels, metadata, target_size)
         from angle_cnn.core.afm_preprocess import prepare_afm_channels
-        _, height_fft = prepare_afm_channels(channels, metadata.scan_size_nm)
+        _, height_fft = prepare_afm_channels(channels, metadata.scan_size_nm, metadata.cnn_crop_fov_nm)
         print(f"  预处理完成：形状 {image.shape}")
     except Exception as e:
         print(f"  预处理失败：{e}")
@@ -447,6 +451,8 @@ def main():
     parser.add_argument("--target-size", type=int, default=128, help="目标图像尺寸")
     parser.add_argument("--fov-nm", type=float, default=None,
                         help="实测正方形扫描视野边长（nm）；缺失时须由原始文件可靠提供")
+    parser.add_argument("--crop-fov-nm", type=float, default=TRAIN_CROP_FOV_NM,
+                        help="CNN 训练图像的物理裁剪视野（nm）；自定义模型须与 checkpoint 一致")
     parser.add_argument("--preview", action="store_true", help="生成预览图")
     parser.add_argument("--pattern", type=str, default="*", help="文件匹配模式")
     
@@ -482,6 +488,7 @@ def main():
             args.target_size,
             args.preview,
             args.fov_nm,
+            args.crop_fov_nm,
         )
         if result:
             output_files.append(result)

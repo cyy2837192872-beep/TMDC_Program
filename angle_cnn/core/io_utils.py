@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Union
 
 import numpy as np
@@ -52,6 +53,18 @@ def load_npz_dataset(path: str) -> np.lib.npyio.NpzFile:
     return data
 
 
+def read_dataset_config(data: np.lib.npyio.NpzFile) -> dict | None:
+    """Read the JSON config of format-v2 datasets; legacy object configs return None."""
+    if "config" not in data.files:
+        return None
+    try:
+        raw = data["config"]
+        config = json.loads(str(raw.item()))
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+        return None
+    return config if isinstance(config, dict) and config.get("format_version") == 2 else None
+
+
 def validate_npz_dataset(data: np.lib.npyio.NpzFile) -> list[str]:
     """Validate dataset array shapes, types, and value ranges.
 
@@ -87,6 +100,16 @@ def validate_npz_dataset(data: np.lib.npyio.NpzFile) -> list[str]:
                 issues.append(f"{lbl_key}: labels range [{lbl_min:.2f}, {lbl_max:.2f}] outside [{THETA_MIN}, {THETA_MAX}]")
         if fovs.ndim != 1:
             issues.append(f"{fov_key}: expected 1D, got {fovs.ndim}D shape {fovs.shape}")
+        elif not np.all(np.isfinite(fovs)) or np.any(fovs <= 0):
+            issues.append(f"{fov_key}: FOV values must be finite and positive")
+    config = read_dataset_config(data)
+    if config and config.get("fov_semantics") == "cnn_crop_nm":
+        expected = config.get("crop_fov_nm")
+        if expected is not None:
+            for split in ("train", "val", "test"):
+                fov_key = f"fovs_{split}"
+                if fov_key in data and not np.allclose(data[fov_key], expected, rtol=1e-4):
+                    issues.append(f"{fov_key}: values disagree with config crop_fov_nm={expected}")
     return issues
 
 

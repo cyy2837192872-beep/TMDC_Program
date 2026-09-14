@@ -37,7 +37,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 from angle_cnn.core.config import IMG_SIZE, THETA_MAX, THETA_MIN
 from angle_cnn.core.physics import FIXED_FOV_NM
 from angle_cnn.core.eval_utils import load_model_from_checkpoint
-from angle_cnn.core.physics import pixels_per_moire_period
 from angle_cnn.dataset_generator import (
     DEFAULT_BLUR_RANGE,
     DEFAULT_NOISE_RANGE,
@@ -54,7 +53,7 @@ from angle_cnn.dataset_generator import (
 )
 
 # 复用 eval_compare 的鲁棒 FFT 和 CNN 推理
-from angle_cnn.core.eval_fft import extract_angle_fft_robust as _extract_angle_fft_robust
+from angle_cnn.core.eval_fft import extract_angle_fft_blind
 from angle_cnn.core.cnn import predict_with_uncertainty
 
 from angle_cnn.core.fonts import setup_matplotlib_cjk_font
@@ -179,6 +178,8 @@ def run_sweep(
 
         levels = dim_cfg["levels"]
         fft_maes, fft128_maes, cnn_maes, cnn_stds_all = [], [], [], []
+        fft_medaes, fft128_medaes, cnn_medaes = [], [], []
+        fft_fail_rates, fft128_fail_rates, cnn_fail_rates = [], [], []
 
         for li, level in enumerate(levels):
             fft_errs, fft128_errs, cnn_errs = [], [], []
@@ -190,7 +191,7 @@ def run_sweep(
                     rng = np.random.default_rng(seed)
 
                     degrad_kwargs = _build_degradation_kwargs(dim_name, level)
-                    img_cnn, h512, fov_nm, actual_ppp = generate_sample_paired_cnn_fft(
+                    img_cnn, h512, fov_nm, _actual_ppp = generate_sample_paired_cnn_fft(
                         theta, rng,
                         img_size=IMG_SIZE,
                         fixed_fov_nm=FIXED_FOV_NM,
@@ -200,7 +201,7 @@ def run_sweep(
                     )
 
                     # FFT-512
-                    th_fft = _extract_angle_fft_robust(h512, fov_nm=fov_nm, actual_ppp=actual_ppp)
+                    th_fft = extract_angle_fft_blind(h512, fov_nm=fov_nm)
                     if np.isfinite(th_fft):
                         fft_errs.append(abs(th_fft - theta))
 
@@ -211,8 +212,7 @@ def run_sweep(
                     h128 = h512[oy:oy + IMG_SIZE, ox:ox + IMG_SIZE]
                     scale = IMG_SIZE / n_sim
                     fov_128 = fov_nm * scale
-                    ppp_128 = pixels_per_moire_period(IMG_SIZE, theta, fov_128)
-                    th_fft128 = _extract_angle_fft_robust(h128, fov_nm=fov_128, actual_ppp=ppp_128)
+                    th_fft128 = extract_angle_fft_blind(h128, fov_nm=fov_128)
                     if np.isfinite(th_fft128):
                         fft128_errs.append(abs(th_fft128 - theta))
 
@@ -223,20 +223,29 @@ def run_sweep(
                         from angle_cnn.core.cnn import compute_fft_channel
                         x = compute_fft_channel(x)
                     mean_deg, std_deg = predict_with_uncertainty(model, x, n_samples=mc_samples)
-                    cnn_errs.append(abs(mean_deg[0] - theta))
-                    cnn_stds_list.append(std_deg[0])
+                    if np.isfinite(mean_deg[0]) and np.isfinite(std_deg[0]):
+                        cnn_errs.append(abs(mean_deg[0] - theta))
+                        cnn_stds_list.append(std_deg[0])
 
-            fft_mae = float(np.median(fft_errs)) if fft_errs else float("nan")
-            fft128_mae = float(np.median(fft128_errs)) if fft128_errs else float("nan")
-            cnn_mae = float(np.median(cnn_errs))
-            cnn_std_mean = float(np.mean(cnn_stds_list))
-            fft_fail = len(TEST_THETAS) * n_trials - len(fft_errs)
-            fft128_fail = len(TEST_THETAS) * n_trials - len(fft128_errs)
+            fft_mae = float(np.mean(fft_errs)) if fft_errs else float("nan")
+            fft128_mae = float(np.mean(fft128_errs)) if fft128_errs else float("nan")
+            cnn_mae = float(np.mean(cnn_errs)) if cnn_errs else float("nan")
+            cnn_std_mean = float(np.mean(cnn_stds_list)) if cnn_stds_list else float("nan")
+            total = len(TEST_THETAS) * n_trials
+            fft_fail = total - len(fft_errs)
+            fft128_fail = total - len(fft128_errs)
+            cnn_fail = total - len(cnn_errs)
 
             fft_maes.append(fft_mae)
             fft128_maes.append(fft128_mae)
             cnn_maes.append(cnn_mae)
             cnn_stds_all.append(cnn_std_mean)
+            fft_fail_rates.append(fft_fail / total * 100)
+            fft128_fail_rates.append(fft128_fail / total * 100)
+            cnn_fail_rates.append(cnn_fail / total * 100)
+            fft_medaes.append(float(np.median(fft_errs)) if fft_errs else float("nan"))
+            fft128_medaes.append(float(np.median(fft128_errs)) if fft128_errs else float("nan"))
+            cnn_medaes.append(float(np.median(cnn_errs)) if cnn_errs else float("nan"))
 
             status = "OOD" if level > dim_cfg["train_range"][1] else "in-distr"
             fft128_str = f"FFT128={fft128_mae:.4f}° (fail={fft128_fail})" if not np.isnan(fft128_mae) else "FFT128=fail"
@@ -251,8 +260,15 @@ def run_sweep(
             "fft128_mae": fft128_maes,
             "cnn_mae": cnn_maes,
             "cnn_std": cnn_stds_all,
+            "fft_fail_rate_pct": fft_fail_rates,
+            "fft128_fail_rate_pct": fft128_fail_rates,
+            "cnn_fail_rate_pct": cnn_fail_rates,
+            "fft_medae": fft_medaes,
+            "fft128_medae": fft128_medaes,
+            "cnn_medae": cnn_medaes,
             "train_range": dim_cfg["train_range"],
             "xlabel": dim_cfg["xlabel"],
+            "n_trials": n_trials,
         }
 
     return results
@@ -292,7 +308,7 @@ def plot_sweep(results: Dict[str, dict]) -> None:
         ax.fill_between(levels, np.maximum(cnn_mae - cnn_std, 0), cnn_mae + cnn_std,
                          alpha=0.2, color="darkorange", label="CNN ±1σ (MC Dropout)")
 
-        ax.set(xlabel=dim_data["xlabel"], ylabel="中位角度误差 (°)",
+        ax.set(xlabel=dim_data["xlabel"], ylabel="MAE (°)",
                title=dim_name.capitalize())
         ax.legend(fontsize=8, loc="upper left")
         ax.grid(alpha=0.3)
@@ -316,7 +332,9 @@ def save_csv(results: Dict[str, dict]) -> None:
         writer = csv.writer(f)
         writer.writerow(["dim", "level", "train_lo", "train_hi",
                          "fft512_mae_deg", "fft128_mae_deg", "cnn_mae_deg", "cnn_mc_std_deg",
-                         "fft512_over_cnn_ratio", "is_ood"])
+                         "fft512_medae_deg", "fft128_medae_deg", "cnn_medae_deg",
+                         "fft512_fail_rate_pct", "fft128_fail_rate_pct", "cnn_fail_rate_pct",
+                         "n_trials", "fft_period_prior", "fft512_over_cnn_ratio", "is_ood"])
         for dim_name, dim_data in results.items():
             train_lo, train_hi = dim_data["train_range"]
             for i, level in enumerate(dim_data["levels"]):
@@ -328,7 +346,12 @@ def save_csv(results: Dict[str, dict]) -> None:
                 is_ood = level > train_hi
                 writer.writerow([dim_name, f"{level:.4f}", f"{train_lo:.4f}", f"{train_hi:.4f}",
                                  f"{fft_m:.4f}", f"{fft128_m:.4f}", f"{cnn_m:.4f}", f"{cnn_s:.4f}",
-                                 f"{ratio:.3f}", is_ood])
+                                 f"{dim_data['fft_medae'][i]:.4f}", f"{dim_data['fft128_medae'][i]:.4f}",
+                                 f"{dim_data['cnn_medae'][i]:.4f}",
+                                 f"{dim_data['fft_fail_rate_pct'][i]:.1f}",
+                                 f"{dim_data['fft128_fail_rate_pct'][i]:.1f}",
+                                 f"{dim_data['cnn_fail_rate_pct'][i]:.1f}",
+                                 dim_data["n_trials"], "none", f"{ratio:.3f}", is_ood])
     print(f"  已保存: {path}")
 
 

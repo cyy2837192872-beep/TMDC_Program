@@ -78,7 +78,7 @@ from angle_cnn.core.cnn import (
     predict_with_uncertainty,
     warmup_cosine_lr,
 )
-from angle_cnn.core.io_utils import load_model_checkpoint, load_npz_dataset, state_dict_from_checkpoint
+from angle_cnn.core.io_utils import load_model_checkpoint, load_npz_dataset, read_dataset_config, state_dict_from_checkpoint
 from angle_cnn.core.seed import set_global_seed, worker_init_fn
 from angle_cnn.core.augment import get_default_augmentation
 from angle_cnn.core.metrics import compute_stratified_metrics, generate_evaluation_report
@@ -444,6 +444,13 @@ def main():
 
     print(f"\n加载数据集: {dataset_path}")
     data = load_npz_dataset(dataset_path)
+    dataset_config = read_dataset_config(data)
+    if dataset_config and (dataset_config.get("img_size") != 128 or
+                           not np.isclose(dataset_config.get("theta_min", THETA_MIN), THETA_MIN) or
+                           not np.isclose(dataset_config.get("theta_max", THETA_MAX), THETA_MAX)):
+        raise ValueError("dataset image size or angle range differs from the current 128px / 0.5–5° model contract")
+    train_crop_fov_nm = (float(dataset_config["crop_fov_nm"])
+                         if dataset_config and "crop_fov_nm" in dataset_config else None)
 
     base_n_ch = detect_n_channels(data["images_train"])
     preloaded_ckpt = None
@@ -703,6 +710,7 @@ def main():
                         "theta_max": THETA_MAX,
                         "n_channels": n_ch,
                         "base_n_channels": base_n_ch,
+                        "train_crop_fov_nm": train_crop_fov_nm,
                         "add_fft_channel": add_fft,
                         "dropout": args.dropout,
                         "epoch": epoch,
@@ -761,6 +769,7 @@ def main():
                         "theta_max": THETA_MAX,
                         "n_channels": n_ch,
                         "base_n_channels": base_n_ch,
+                        "train_crop_fov_nm": train_crop_fov_nm,
                         "add_fft_channel": add_fft,
                         "dropout": args.dropout,
                         "epoch": epoch,

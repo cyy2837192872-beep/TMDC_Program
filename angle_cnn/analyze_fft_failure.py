@@ -22,7 +22,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from angle_cnn.core.degrade import apply_affine_distortion, apply_background_tilt, apply_row_noise
 from angle_cnn.core.fonts import setup_matplotlib_cjk_font
-from angle_cnn.core.io_utils import load_npz_dataset, require_file
+from angle_cnn.core.io_utils import load_npz_dataset, read_dataset_config, require_file
 from angle_cnn.core.config import THETA_MIN, THETA_MAX
 from angle_cnn.core.physics import (
     A_NM,
@@ -53,6 +53,9 @@ def analyze_fft_on_test_set():
     # 加载测试集
     DATA_PATH = os.path.join(SCRIPT_DIR, "..", "data", "moire_dataset.npz")
     data = load_npz_dataset(DATA_PATH)
+    config = read_dataset_config(data)
+    if config is None or config.get("fov_semantics") != "cnn_crop_nm":
+        raise ValueError("此诊断需要 format_version=2 且 fovs_* 为 CNN 裁剪视野的数据集")
     images_test = data["images_test"]  # (N, 128, 128)
     labels_test = data["labels_test"]
     fovs_test = data["fovs_test"]
@@ -70,21 +73,19 @@ def analyze_fft_on_test_set():
     fov = fovs_test[sample_idx]
     
     img_px = img.shape[0]  # 128
-    scale = img_px / 512
     
     print(f"\n样本 {sample_idx}:")
     print(f"  图像尺寸: {img_px}×{img_px}")
     print(f"  真实角度: {label:.2f}°")
     print(f"  记录的视野(fov): {fov:.1f} nm")
     
-    # eval_compare.py：ppp = n·L/fov（每莫尔周期像素数）；裁剪后 fov 与 n 同比缩放时 ppp 不变
-    fov_actual = fov * scale
+    # v2 fovs_* records the physical FOV of the stored CNN crop.
+    fov_actual = fov
     actual_ppp = pixels_per_moire_period(img_px, label, fov_actual)
     ppp_512 = pixels_per_moire_period(512, label, FIXED_FOV_NM)
 
     print(f"\n  eval_compare.py 计算方式：")
-    print(f"    scale = {img_px} / 512 = {scale:.4f}")
-    print(f"    fov_actual = {fov} × {scale} = {fov_actual:.1f} nm")
+    print(f"    fov_actual = fovs_test[{sample_idx}] = {fov_actual:.1f} nm")
     print(f"    ppp(512,θ) = {ppp_512:.1f} px/周期（参考）")
     print(f"    ppp(本图) = {actual_ppp:.2f} px/周期")
     

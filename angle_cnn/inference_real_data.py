@@ -59,7 +59,7 @@ from angle_cnn.core.cnn import (
 from angle_cnn.core.config import THETA_MIN, THETA_MAX
 from angle_cnn.core.eval_fft import extract_angle_fft_blind
 from angle_cnn.core.io_utils import load_model_checkpoint, state_dict_from_checkpoint
-from angle_cnn.core.afm_preprocess import prepare_afm_channels
+from angle_cnn.core.afm_preprocess import TRAIN_CROP_FOV_NM, prepare_afm_channels
 from angle_cnn.core.fusion import fuse_angles
 
 
@@ -121,7 +121,9 @@ def load_preprocessed_npz(path: str) -> tuple[np.ndarray, np.ndarray, dict]:
     return image, height_fft, meta
 
 
-def load_raw_as_npz(filepath: str, fov_nm: float | None = None) -> tuple[np.ndarray, np.ndarray, dict]:
+def load_raw_as_npz(
+    filepath: str, fov_nm: float | None = None, crop_fov_nm: float = TRAIN_CROP_FOV_NM,
+) -> tuple[np.ndarray, np.ndarray, dict]:
     """直接加载原始 AFM 文件并预处理为 (3, 128, 128) 格式。
 
     优先使用 core.io_afm 的 Cypher ES 解析器；回退到 PIL。
@@ -169,8 +171,9 @@ def load_raw_as_npz(filepath: str, fov_nm: float | None = None) -> tuple[np.ndar
     channels = selected
 
     measured_fov = fov_nm if fov_nm is not None else meta.get("scan_size_nm")
-    image, height_fft = prepare_afm_channels(channels, float(measured_fov or 0))
+    image, height_fft = prepare_afm_channels(channels, float(measured_fov or 0), crop_fov_nm)
     meta["scan_size_nm"] = float(measured_fov)
+    meta["cnn_crop_fov_nm"] = crop_fov_nm
     return image, height_fft, meta
 
 
@@ -362,8 +365,9 @@ def main():
 
     # 加载 CNN 模型
     model, add_fft, n_channels, ckpt_meta = load_cnn_model(model_path, device)
+    crop_fov_nm = float(ckpt_meta.get("train_crop_fov_nm") or TRAIN_CROP_FOV_NM)
     base_channels = int(ckpt_meta.get("base_n_channels", n_channels - int(add_fft)))
-    if base_channels not in (1, 3):
+    if base_channels not in (1, 2, 3):
         raise ValueError(f"不支持的基础通道数: {base_channels}")
     if add_fft:
         print(f"  CNN 使用 FFT 额外通道")
@@ -380,10 +384,12 @@ def main():
                     image, height_fft, meta = load_preprocessed_npz(filepath)
                     if args.fov_nm is not None and not np.isclose(args.fov_nm, float(meta.get("scan_size_nm", 0))):
                         raise ValueError("--fov-nm 与已预处理 NPZ 的视野不一致；请重新预处理原始图像")
+                    if not np.isclose(float(meta.get("cnn_crop_fov_nm", TRAIN_CROP_FOV_NM)), crop_fov_nm):
+                        raise ValueError("NPZ 的 CNN 裁剪视野与 checkpoint 不一致；请按模型训练视野重新预处理")
                 else:
-                    image, height_fft, meta = load_raw_as_npz(filepath, args.fov_nm)
+                    image, height_fft, meta = load_raw_as_npz(filepath, args.fov_nm, crop_fov_nm)
             else:
-                image, height_fft, meta = load_raw_as_npz(filepath, args.fov_nm)
+                image, height_fft, meta = load_raw_as_npz(filepath, args.fov_nm, crop_fov_nm)
 
             # CNN
             cnn_angle, cnn_unc, _ = run_cnn_inference(

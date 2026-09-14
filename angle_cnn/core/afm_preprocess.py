@@ -11,7 +11,9 @@ TRAIN_CROP_PIXELS = 128
 TRAIN_CROP_FOV_NM = FIXED_FOV_NM * TRAIN_CROP_PIXELS / TRAIN_SIM_PIXELS
 
 
-def prepare_afm_channels(channels: dict, fov_nm: float) -> tuple[np.ndarray, np.ndarray]:
+def prepare_afm_channels(
+    channels: dict, fov_nm: float, crop_fov_nm: float = TRAIN_CROP_FOV_NM,
+) -> tuple[np.ndarray, np.ndarray]:
     """Return (3,128,128) CNN crop and original-resolution normalized height.
 
     Training normalizes each full synthetic channel before cropping a 128-pixel
@@ -21,6 +23,8 @@ def prepare_afm_channels(channels: dict, fov_nm: float) -> tuple[np.ndarray, np.
 
     if not np.isfinite(fov_nm) or fov_nm <= 0:
         raise ValueError("scan_size_nm must be a positive, finite number")
+    if not np.isfinite(crop_fov_nm) or crop_fov_nm <= 0:
+        raise ValueError("crop_fov_nm must be a positive, finite number")
     height = channels.get("height")
     if height is None:
         raise ValueError("a calibrated height channel is required")
@@ -28,7 +32,7 @@ def prepare_afm_channels(channels: dict, fov_nm: float) -> tuple[np.ndarray, np.
     if height.ndim != 2 or height.shape[0] != height.shape[1]:
         raise ValueError("AFM scan must be a square 2D image with one square FOV")
     n = height.shape[0]
-    crop_px = round(TRAIN_CROP_FOV_NM * n / fov_nm)
+    crop_px = round(crop_fov_nm * n / fov_nm)
     if crop_px < TRAIN_CROP_PIXELS:
         raise ValueError("AFM pixel resolution is below the training resolution; upsampling cannot recover detail")
     if crop_px > n:

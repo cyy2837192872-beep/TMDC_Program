@@ -126,6 +126,9 @@ python dataset_generator.py --samples 20000 --workers 8
 
 与 `core/config.py` 对齐的常用默认：**θ ∈ [0.5°, 5°]**，**CNN 裁剪 128**，推荐仿真 **512**（与 `eval_compare` 高分辨率 FFT 口径一致）。**若你曾在 2026-04 之前的代码版本上生成过 `.npz`，请用当前 `core/moire_sim.py`（固定 nm 视野）重新生成数据集后再训练**，以免与论文中「固定物理视野」表述不一致。
 
+新生成的 `fovs_train/val/test` 表示**存入 NPZ 的 CNN 裁剪图**的物理视野；根目录 `config` 是可在 `allow_pickle=False` 下读取的 JSON，含 `format_version=2`、全图视野、裁剪视野和主要生成参数。旧版数据集的 `fovs_*` 曾记录全图视野，不能直接用于裁剪图的定量 FFT 或尺度标定。若用 `--n-sim 256` 训练，128 像素裁剪约为 156.8 nm；配对评估的固定 512/128 协议会拒绝与该训练视野不一致的新数据。
+每张训练图使用由总 `seed` 和样本索引确定的子种子；相同参数下，`--workers 0` 与多进程生成的 NPZ 数组一致。
+
 ### 2. 训练 CNN（`train_cnn.py` v5）
 
 ```bash
@@ -195,7 +198,7 @@ python inference_real_data.py --input-dir data/afm_raw/ --output real_results/ -
 python inference_real_data.py --input sample.npz --output real_results/
 ```
 
-同时运行 CNN（MC Dropout 不确定性）+ 盲 FFT + 融合（默认 τ=0.5°），输出 CSV 结果和每样本三栏预览图。必须提供可信的正方形扫描视野（nm）；CNN 使用与默认训练集相同的约 78.4 nm 中心裁剪，FFT 使用原始分辨率。低于训练像素分辨率或旧版不含 `height_fft` 的 NPZ 会报错。只有 height 通道时，缺失的 phase/amplitude 仍以 height 复制；结果须经真实标注样本验证，不能直接当实验精度。
+同时运行 CNN（MC Dropout 不确定性）+ 盲 FFT + 融合（默认 τ=0.5°），输出 CSV 结果和每样本三栏预览图。必须提供可信的正方形扫描视野（nm）；CNN 按 checkpoint 记录的训练裁剪视野截取中心图（默认约 78.4 nm），FFT 使用原始分辨率。预处理自定义模型数据时，需传入与 checkpoint 一致的 `--crop-fov-nm`。低于训练像素分辨率或旧版不含 `height_fft` 的 NPZ 会报错。只有 height 通道时，缺失的 phase/amplitude 仍以 height 复制；结果须经真实标注样本验证，不能直接当实验精度。
 详细优化路线图：`angle_cnn/docs/sim_to_real_roadmap.md`。
 
 ### 6. 其它评测与工具
@@ -203,6 +206,7 @@ python inference_real_data.py --input sample.npz --output real_results/
 ```bash
 python graded_eval.py --mc-samples 30
 python distortion_sweep.py
+python robustness_sweep.py --trials 10 --mc-samples 30  # CSV 同时记录 MAE、MedAE、失败率；FFT 无标签先验
 python analyze_fft_failure.py
 python preprocess_afm_data.py --input path/to/scan --output ../data/afm_processed/
 ```

@@ -36,7 +36,7 @@ v2 新增
     ~/tmdc-project/data/moire_dataset.npz
         images_train : (N_train, [C,] 128, 128) float32
         labels_train : (N_train,) float32  单位：度
-        fovs_train   : (N_train,) float32  单位：nm
+        fovs_train   : (N_train,) float32  CNN 裁剪视野，单位：nm
         ...（val, test 同理）
 """
 
@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import json
 import os
 import sys
 import time
@@ -188,7 +189,7 @@ def generate_sample(
     Returns
     -------
     img : (C, img_size, img_size) float32 if n_channels > 1, else (img_size, img_size)
-    fov_nm : float
+    fov_nm : float, returned image's physical field of view in nm
     """
     requested = CHANNEL_NAMES[:n_channels]
 
@@ -243,9 +244,10 @@ def generate_sample(
             arr = arr[oy: oy + img_size, ox: ox + img_size]
         crops.append(arr.astype(np.float32))
 
+    crop_fov_nm = fov_nm * min(n_sim, img_size) / n_sim
     if n_channels == 1:
-        return crops[0], fov_nm
-    return np.stack(crops, axis=0), fov_nm
+        return crops[0], crop_fov_nm
+    return np.stack(crops, axis=0), crop_fov_nm
 
 
 def generate_sample_paired_cnn_fft(
@@ -448,6 +450,10 @@ def generate_dataset(
 ):
     if parallel_workers is None:
         parallel_workers = int(os.environ.get("DATASET_NUM_WORKERS", "0"))
+    if n_total < 3 or img_size < 1 or n_sim < img_size:
+        raise ValueError("n_total must be >=3 and n_sim must be >= img_size >=1")
+    if not (0 < theta_min < theta_max):
+        raise ValueError("theta_min and theta_max must be positive and increasing")
 
     rng = np.random.default_rng(seed)
     fixed_fov_nm = 10 * moire_period(theta_min)
@@ -495,8 +501,11 @@ def generate_dataset(
     t0 = time.time()
 
     config = {
+        "format_version": 2,
+        "fov_semantics": "cnn_crop_nm",
         "img_size": img_size,
         "fixed_fov_nm": fixed_fov_nm,
+        "crop_fov_nm": fixed_fov_nm * img_size / n_sim,
         "n_channels": n_channels,
         "tip_radius_nm": tip_radius_nm,
         "tip_radius_range": tip_radius_range,
@@ -579,8 +588,9 @@ def generate_dataset(
             )
             seq = pbar_seq
         for i in seq:
+            sample_rng = np.random.default_rng(_subseed(seed, i))
             images[i], fovs[i] = generate_sample(
-                thetas[i], rng,
+                thetas[i], sample_rng,
                 img_size=img_size,
                 fixed_fov_nm=fixed_fov_nm,
                 n_channels=n_channels,
@@ -618,8 +628,12 @@ def generate_dataset(
 
 def split_dataset(images, labels, fovs, ratio=DEFAULT_SPLIT_RATIO):
     n = len(images)
+    if len(ratio) != 3 or any(r <= 0 for r in ratio) or not np.isclose(sum(ratio), 1):
+        raise ValueError("split ratio must have three positive entries summing to 1")
     n_train = int(n * ratio[0])
     n_val = int(n * ratio[1])
+    if min(n_train, n_val, n - n_train - n_val) < 1:
+        raise ValueError("dataset is too small for nonempty train/val/test splits")
     return (
         images[:n_train], labels[:n_train], fovs[:n_train],
         images[n_train:n_train + n_val], labels[n_train:n_train + n_val], fovs[n_train:n_train + n_val],
@@ -657,6 +671,10 @@ def main():
     shear_x_range = (-args.shear_max / 3, args.shear_max / 3)
     shear_y_range = (-args.shear_max, args.shear_max)
     split_ratio = (args.train_ratio, args.val_ratio, 1 - args.train_ratio - args.val_ratio)
+    n_train = int(args.samples * split_ratio[0])
+    n_val = int(args.samples * split_ratio[1])
+    if min(n_train, n_val, args.samples - n_train - n_val) < 1:
+        raise ValueError("--samples and split ratios must leave at least one sample in every split")
 
     print(f"配置:")
     print(f"  样本数:      {args.samples}")
@@ -728,7 +746,9 @@ def main():
         images_train=img_train, labels_train=lbl_train, fovs_train=fov_train,
         images_val=img_val, labels_val=lbl_val, fovs_val=fov_val,
         images_test=img_test, labels_test=lbl_test, fovs_test=fov_test,
-        config={
+        config=json.dumps({
+            "format_version": 2,
+            "fov_semantics": "cnn_crop_nm",
             "n_samples": args.samples,
             "img_size": args.img_size,
             "n_channels": args.channels,
@@ -738,9 +758,17 @@ def main():
             "tip_radius_nm": args.tip_radius,
             "tip_radius_range": list(tip_radius_range),
             "n_sim": args.n_sim,
+            "full_fov_nm": 10 * moire_period(args.theta_min),
+            "crop_fov_nm": 10 * moire_period(args.theta_min) * args.img_size / args.n_sim,
+            "train_ratio": args.train_ratio,
+            "val_ratio": args.val_ratio,
+            "noise_range": list(noise_range),
+            "blur_range": list(blur_range),
+            "shear_x_range": list(shear_x_range),
+            "shear_y_range": list(shear_y_range),
             "theta_sampling": theta_sampling,
             "seed": args.seed,
-        },
+        }),
     )
 
     size_mb = os.path.getsize(save_path) / 1024 ** 2

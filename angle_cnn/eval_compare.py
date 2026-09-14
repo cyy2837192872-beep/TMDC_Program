@@ -45,15 +45,14 @@ import torch
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from angle_cnn.core.eval_fft import (
-    extract_angle_fft_robust,
     extract_angle_fft_blind,
     fft_predict_batch_512,
-    generate_fft_image_512,
 )
 from angle_cnn.core.fonts import setup_matplotlib_cjk_font
 from angle_cnn.core.io_utils import (
     load_model_checkpoint,
     load_npz_dataset,
+    read_dataset_config,
     require_file,
     state_dict_from_checkpoint,
 )
@@ -564,6 +563,11 @@ def main():
 
     print(f"\n加载数据集: {DATASET_PATH}")
     data = load_npz_dataset(DATASET_PATH)
+    dataset_config = read_dataset_config(data)
+    if dataset_config and (dataset_config.get("img_size") != 128 or
+                           not np.isclose(dataset_config.get("theta_min", THETA_MIN), THETA_MIN) or
+                           not np.isclose(dataset_config.get("theta_max", THETA_MAX), THETA_MAX)):
+        raise ValueError("dataset image size or angle range differs from the fixed evaluation contract")
     images_test = data["images_test"]
     labels_test = data["labels_test"]
     n_ch = detect_n_channels(images_test)
@@ -592,6 +596,17 @@ def main():
     cnn_input: np.ndarray
 
     if cli_args.eval_mode == "paired":
+        expected_crop_fov = FIXED_FOV_NM * 128 / 512
+        dataset_crop_fov = (float(dataset_config["crop_fov_nm"])
+                            if dataset_config and "crop_fov_nm" in dataset_config else None)
+        ckpt_crop_fov = (ckpt.get("train_crop_fov_nm") if isinstance(ckpt, dict) else None)
+        if dataset_crop_fov is not None and ckpt_crop_fov is not None and not np.isclose(dataset_crop_fov, ckpt_crop_fov):
+            raise ValueError("dataset crop FOV disagrees with checkpoint training crop FOV")
+        actual_crop_fov = dataset_crop_fov if dataset_crop_fov is not None else ckpt_crop_fov
+        if actual_crop_fov is None:
+            raise ValueError("paired evaluation requires a format-v2 dataset or checkpoint with train_crop_fov_nm")
+        if not np.isclose(actual_crop_fov, expected_crop_fov):
+            raise ValueError("paired 512/128 evaluation does not match the checkpoint's training crop FOV")
         print("\n[paired] 生成同场景配对样本（较慢）并 FFT 提角…")
         paired_list: list[np.ndarray] = []
         fft_list: list[float] = []
