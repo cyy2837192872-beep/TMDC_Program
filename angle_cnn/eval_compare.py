@@ -56,7 +56,7 @@ from angle_cnn.core.io_utils import (
     require_file,
     state_dict_from_checkpoint,
 )
-from dataset_generator import (
+from angle_cnn.dataset_generator import (
     _subseed,
     generate_sample_paired_cnn_fft,
 )
@@ -68,6 +68,7 @@ from angle_cnn.core.cnn import (
     detect_n_channels,
     predict_with_uncertainty,
 )
+from angle_cnn.core.fusion import fuse_angles
 from angle_cnn.core.metrics import (
     compute_calibration_metrics,
     compute_stratified_metrics,
@@ -95,13 +96,8 @@ def fusion_predict(
     unc_scale: float = 0.5,
 ) -> np.ndarray:
     """θ_final = w·θ_fft + (1-w)·θ_cnn，CNN 不确定度越大 w 越大（更偏向 FFT）。"""
-    w = cnn_stds / (cnn_stds + unc_scale + 1e-9)
-    w = np.clip(w, 0.0, 1.0)
-    return np.where(
-        np.isnan(fft_preds),
-        cnn_preds,
-        w * fft_preds + (1.0 - w) * cnn_preds,
-    ).astype(np.float32)
+    fused, _ = fuse_angles(fft_preds, cnn_preds, cnn_stds, unc_scale)
+    return np.asarray(fused, dtype=np.float32)
 
 
 def sweep_fusion_tau(
@@ -469,11 +465,22 @@ def save_report(
     csv_path = os.path.join(OUT_DIR, "compare_summary.csv")
     row = {
         "eval_mode": eval_mode,
+        "fft_period_prior": "ground_truth_angle",
         "n_samples": int(len(labels)),
         "fft_valid": int(fft_valid.sum()),
+        "cnn_valid": int(np.isfinite(cnn_preds).sum()),
         "fft_fail_rate_pct": float((~fft_valid).sum() / len(labels) * 100),
+        "cnn_fail_rate_pct": float((~np.isfinite(cnn_preds)).sum() / len(labels) * 100),
         "fft_mae_deg": float(fft_errors.mean()),
         "cnn_mae_deg": float(cnn_errors.mean()),
+        "fft_median_deg": float(np.median(fft_errors)),
+        "cnn_median_deg": float(np.median(cnn_errors)),
+        "fft_std_deg": float(np.std(fft_errors)),
+        "cnn_std_deg": float(np.std(cnn_errors)),
+        "fft_p90_deg": float(np.percentile(fft_errors, 90)),
+        "cnn_p90_deg": float(np.percentile(cnn_errors, 90)),
+        "fft_max_error_deg": float(np.max(fft_errors)),
+        "cnn_max_error_deg": float(np.max(cnn_errors)),
         "mae_ratio_fft_over_cnn": float(fft_errors.mean() / cnn_errors.mean()),
         "fft_p95_deg": float(fft_metrics.percentile_errors.get(95, np.nan)),
         "cnn_p95_deg": float(cnn_metrics.percentile_errors.get(95, np.nan)),
@@ -495,6 +502,7 @@ def save_report(
         })
     if cal is not None:
         row.update({
+            "cnn_mean_unc_deg": float(np.mean(cnn_stds)),
             "cnn_within_1sigma_pct": float(cal["within_1sigma_pct"]),
             "cnn_within_2sigma_pct": float(cal["within_2sigma_pct"]),
             "cnn_within_3sigma_pct": float(cal["within_3sigma_pct"]),
@@ -509,7 +517,7 @@ def save_report(
     print(f"  已保存: {csv_path}")
 
 
-if __name__ == "__main__":
+def main():
     import argparse
 
     parser = argparse.ArgumentParser()
@@ -528,8 +536,11 @@ if __name__ == "__main__":
         help="融合权重 τ：w=σ/(σ+τ)，σ 为 CNN MC 标准差（度）",
     )
     parser.add_argument("--save-predictions", action="store_true",
-                        help="保存预测数组到 outputs/compare_predictions.npz（供 generate_thesis_figures.py 使用）")
+                        help="保存预测数组到 outputs/<eval-mode>/compare_predictions.npz")
     cli_args = parser.parse_args()
+    global OUT_DIR
+    OUT_DIR = os.path.join(SCRIPT_DIR, "outputs", cli_args.eval_mode)
+    os.makedirs(OUT_DIR, exist_ok=True)
 
     print("=" * 60)
     print("MoS₂ moiré：FFT(512px) vs CNN(128px) 公平对比评估（v3）")
@@ -550,13 +561,15 @@ if __name__ == "__main__":
     ckpt_n_ch = ckpt.get("n_channels", 1) if isinstance(ckpt, dict) else 1
     ckpt_dropout = ckpt.get("dropout", 0.3) if isinstance(ckpt, dict) else 0.3
     add_fft = ckpt.get("add_fft_channel", False) if isinstance(ckpt, dict) else False
-    model = build_model(n_channels=ckpt_n_ch, dropout=ckpt_dropout).to(device)
+    model = build_model(n_channels=ckpt_n_ch, dropout=ckpt_dropout,
+                        arch=ckpt.get("arch", "resnet18") if isinstance(ckpt, dict) else "resnet18").to(device)
     model.load_state_dict(state_dict_from_checkpoint(ckpt))
     if add_fft:
         print(f"  模型含 FFT 通道（n_channels={ckpt_n_ch}）")
 
-    if ckpt_n_ch != n_ch and cli_args.eval_mode == "legacy":
-        print(f"  警告：checkpoint 期望 {ckpt_n_ch} 通道，数据集为 {n_ch}，请检查模型与数据是否匹配。")
+    base_n_ch = int(ckpt.get("base_n_channels", ckpt_n_ch - int(add_fft))) if isinstance(ckpt, dict) else ckpt_n_ch
+    if base_n_ch != n_ch:
+        raise ValueError(f"checkpoint expects {base_n_ch} base channels, dataset has {n_ch}")
 
     fft_preds: np.ndarray
     cnn_input: np.ndarray
@@ -573,7 +586,7 @@ if __name__ == "__main__":
                 rng,
                 img_size=128,
                 fixed_fov_nm=FIXED_FOV_NM,
-                n_channels=ckpt_n_ch,
+                n_channels=base_n_ch,
                 tip_radius_range=DEFAULT_TIP_RADIUS_RANGE,
                 n_sim=512,
             )
@@ -628,6 +641,10 @@ if __name__ == "__main__":
         print(f"  扫描范围: [{sweep_data['taus'][0]:.4f}, {sweep_data['taus'][-1]:.4f}]° "
               f"共 {len(sweep_data['taus'])} 点")
         plot_tau_sweep(sweep_data)
+        with open(os.path.join(OUT_DIR, "tau_sweep.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["tau", "fusion_mae", "fusion_p95"])
+            writer.writerows(zip(sweep_data["taus"], sweep_data["maes"], sweep_data["p95s"]))
 
     print("\n[3] 误差统计:")
     fft_errors, fft_valid = error_stats(fft_preds, labels_test, "FFT")
@@ -671,3 +688,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print("\n下一步：python distortion_sweep.py")
+
+
+if __name__ == "__main__":
+    main()

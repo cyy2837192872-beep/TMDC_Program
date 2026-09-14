@@ -38,16 +38,17 @@ python train_cnn.py --fp16-data --num-workers 0 --batch-size 256 --no-compile \
 python train_cnn.py --eval-only --mc-samples 30
 
 # 3) FFT vs CNN 公平对比（需 best_model.pt）
-python eval_compare.py --mc-samples 30
+python eval_compare.py --eval-mode paired --mc-samples 30
+python eval_compare.py --eval-mode legacy --mc-samples 30
 
 # 4) 真实 AFM 数据推理
 python inference_real_data.py --input-dir ../data/afm_processed/ --output ../real_results/
 
-# 5) 论文用合并表（需 train_test_summary.csv 与 compare_summary.csv）
+# 5) 论文用合并表（需 train_test_summary.csv 与 outputs/paired/compare_summary.csv）
 python export_thesis_table.py
 ```
 
-输出默认在 **`./outputs/`**（多数大文件被根目录 `.gitignore` 忽略，需本地生成）。
+训练输出默认在 **`./outputs/`**，两种评估分别在 **`./outputs/paired/`** 和 **`./outputs/legacy/`**（多数大文件被根目录 `.gitignore` 忽略，需本地生成）。真实 AFM 推理需实测视野；先用 `preprocess_afm_data.py --fov-nm <nm>` 生成包含原分辨率 `height_fft` 的 NPZ。
 
 ---
 

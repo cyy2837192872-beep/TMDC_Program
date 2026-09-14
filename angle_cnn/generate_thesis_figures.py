@@ -114,9 +114,12 @@ def _parse_report_metrics(report: str) -> dict[str, str]:
 
 def _num(val: str, default: float = 0.0) -> float:
     try:
-        return float(val)
+        result = float(val)
+        if not np.isfinite(result):
+            raise ValueError("non-finite metric")
+        return result
     except (ValueError, TypeError):
-        return default
+        raise ValueError(f"Missing or invalid measured metric: {val!r}")
 
 
 def _pct(val: str) -> str:
@@ -133,7 +136,7 @@ def _deg(val: str, prec: int = 4) -> str:
 def gen_table_eval_modes(legacy: dict, paired: dict) -> str:
     """Tab. tab:eval_modes — 两种评测口径结果对比。"""
     rows = [
-        r"\begin{generaltab}{两种评测口径结果对比（$N=5000$）}{tab:eval_modes}",
+        f"\\begin{{generaltab}}{{两种评测口径结果对比（legacy $N={int(_num(legacy['n_samples']))}$，paired $N={int(_num(paired['n_samples']))}$）}}{{tab:eval_modes}}",
         r"  \begin{tabularx}{\textwidth}{lCCCC}",
         r"    \toprule",
         r"    指标 & FFT (legacy) & FFT (paired) & CNN (legacy) & CNN (paired) \\",
@@ -172,16 +175,17 @@ def gen_table_eval_modes(legacy: dict, paired: dict) -> str:
 def gen_table_final_stats(paired: dict) -> str:
     """Tab. tab:final_stats — FFT vs CNN 完整误差统计。"""
     rows = [
-        r"\begin{generaltab}{FFT vs CNN 完整误差统计（paired 口径，$N=5000$）}{tab:final_stats}",
+        f"\\begin{{generaltab}}{{FFT vs CNN 完整误差统计（paired 口径，$N={int(_num(paired['n_samples']))}$）}}{{tab:final_stats}}",
         r"  \begin{tabularx}{\textwidth}{lCC}",
         r"    \toprule",
         r"    统计指标 & FFT 方法 & CNN 方法 \\",
         r"    \midrule",
     ]
     items = [
-        ("有效样本数", f"${int(_num(paired.get('n_samples','0'))):}$",
-         f"${int(_num(paired.get('n_samples','0'))):}$"),
-        ("失败率", "$0.0\\%$", "$0.0\\%$"),
+        ("有效样本数", f"${int(_num(paired['fft_valid']))}$",
+         f"${int(_num(paired['cnn_valid']))}$"),
+        ("失败率", f"${_num(paired['fft_fail_rate_pct']):.1f}\\%$",
+         f"${_num(paired['cnn_fail_rate_pct']):.1f}\\%$"),
         ("MAE ($^\\circ$)", _deg(paired.get("fft_mae_deg", "0")),
          _deg(paired.get("cnn_mae_deg", "0"))),
         ("中位误差 ($^\\circ$)", _deg(paired.get("fft_median_deg", "0"), 4),
@@ -378,7 +382,7 @@ def fig_scatter(preds_cnn: np.ndarray, preds_fft: np.ndarray,
                 fontsize=9, bbox=dict(facecolor="white", alpha=0.8, pad=2))
 
     plt.colorbar(sc, ax=[ax1, ax2], label="Density", shrink=0.8)
-    fig.suptitle("FFT vs CNN 预测散点图（paired 口径, N=5000）", fontsize=12)
+    fig.suptitle(f"FFT vs CNN 预测散点图（paired 口径, N={len(labels)}）", fontsize=12)
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
@@ -429,7 +433,7 @@ def fig_error_dist(preds_cnn: np.ndarray, preds_fft: np.ndarray,
     ax3.text(0.05, 0.9, "<1 = FFT better", transform=ax3.transAxes, fontsize=8,
              bbox=dict(facecolor="white", alpha=0.8, pad=1))
 
-    fig.suptitle("Error Analysis (Paired, N=5000)", fontsize=12)
+    fig.suptitle(f"Error Analysis (Paired, N={len(labels)})", fontsize=12)
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
@@ -468,7 +472,7 @@ def fig_angle_bin_mae_standalone(bins: list[tuple[float, float, float]],
 def fig_tau_sweep(save_path: str):
     """τ 参数扫描图（从已有 tau_sweep.png 内化/重新生成）。"""
     # 尝试从 tau_sweep.png 所在的 CSV 读取数据
-    tau_csv = os.path.join(OUT_DIR, "tau_sweep.csv")
+    tau_csv = os.path.join(OUT_DIR, "paired", "tau_sweep.csv")
     if os.path.isfile(tau_csv):
         data = _read_csv(tau_csv)
         if data:
@@ -477,10 +481,6 @@ def fig_tau_sweep(save_path: str):
             taus = [float(r["tau"]) for r in data]
             maes = [float(r["fusion_mae"]) for r in data]
             ax.plot(taus, maes, "b-", lw=1.5)
-            ax.axhline(float(data[0].get("fft_mae", 0)), color="gray", ls="--",
-                       lw=1, label=f"FFT only = {data[0].get('fft_mae','?'):}°")
-            ax.axhline(float(data[0].get("cnn_mae", 0)), color="orange", ls="--",
-                       lw=1, label=f"CNN only = {data[0].get('cnn_mae','?'):}°")
             # 找到最优 τ
             best_idx = int(np.argmin(maes))
             ax.plot(taus[best_idx], maes[best_idx], "r*", ms=10, zorder=5,
@@ -583,24 +583,21 @@ def main():
                         help="跳过图表生成，仅生成 LaTeX 表格")
     args = parser.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    print(f"输出目录: {args.output_dir}/")
-
     # ── 加载数据 ──
     train = _read_csv(os.path.join(OUT_DIR, "train_test_summary.csv"))
-    compare = _read_csv(os.path.join(OUT_DIR, "compare_summary.csv"))
-    report = _read_report_txt(os.path.join(OUT_DIR, "compare_report.txt"))
+    paired_rows = _read_csv(os.path.join(OUT_DIR, "paired", "compare_summary.csv"))
+    legacy_rows = _read_csv(os.path.join(OUT_DIR, "legacy", "compare_summary.csv"))
+    report = _read_report_txt(os.path.join(OUT_DIR, "paired", "compare_report.txt"))
     robust = _read_csv(os.path.join(OUT_DIR, "robustness_sweep.csv"))
 
     train_row = train[0] if train else {}
-    compare_paired = compare[0] if compare else {}
-    compare_legacy = compare[1] if len(compare) > 1 else compare_paired
-
-    # CSV 中仅含有 paired 模式（legacy 需单独运行 eval_compare legacy 模式）
-    # 若无 legacy 数据，用 paired 数据近似填充（legacy/paired 差异很小）
-    if compare_legacy.get("eval_mode", "").strip() != "legacy":
-        compare_legacy = dict(compare_paired)
-        compare_legacy["eval_mode"] = "legacy"
+    if len(paired_rows) != 1 or len(legacy_rows) != 1:
+        raise ValueError("论文表格需要分别运行 paired 和 legacy 评估并提供各自的 compare_summary.csv")
+    compare_paired, compare_legacy = paired_rows[0], legacy_rows[0]
+    if compare_paired.get("eval_mode") != "paired" or compare_legacy.get("eval_mode") != "legacy":
+        raise ValueError("compare_summary.csv 的 eval_mode 与目录不符")
+    if not train or not robust or not report:
+        raise ValueError("缺少训练汇总、鲁棒性结果或 paired 评估报告；无法生成论文表格")
 
     # 解析角度分箱
     bins = _parse_angle_bins(report)
@@ -613,18 +610,20 @@ def main():
         if k not in compare_paired or compare_paired.get(k, "").strip() in ("", "0"):
             compare_paired[k] = v
 
-    # 补充中位误差等字段（report 解析优先，CSV 次之，硬编码兜底）
-    _defaults = {
-        "fft_median_deg": "0.0197", "cnn_median_deg": "0.0418",
-        "fft_std_deg": "0.0248", "cnn_std_deg": "0.0463",
-        "fft_p90_deg": "0.0630", "cnn_p90_deg": "0.1120",
-        "fft_max_error_deg": "0.1450", "cnn_max_error_deg": "1.0730",
-        "cnn_mean_unc_deg": train_row.get("mean_unc_deg", "0.196"),
-    }
-    for d in [compare_paired, compare_legacy]:
-        for k, v in _defaults.items():
-            if not d.get(k) or d.get(k, "").strip() in ("", "0"):
-                d[k] = v
+    required = ("n_samples", "fft_valid", "cnn_valid", "fft_fail_rate_pct",
+                "cnn_fail_rate_pct", "fft_mae_deg", "cnn_mae_deg", "fft_median_deg",
+                "cnn_median_deg", "fft_std_deg", "cnn_std_deg", "fft_p90_deg",
+                "cnn_p90_deg", "fft_p95_deg", "cnn_p95_deg", "fft_max_error_deg",
+                "cnn_max_error_deg")
+    for mode, row in (("paired", compare_paired), ("legacy", compare_legacy)):
+        for key in required:
+            if key not in row:
+                raise ValueError(f"{mode} compare_summary.csv 缺少实测字段 {key}")
+            _num(row[key])
+    for key in ("cnn_mean_unc_deg", "cnn_within_1sigma_pct", "fusion_mae_deg", "fusion_unc_scale"):
+        _num(compare_paired.get(key))
+    os.makedirs(args.output_dir, exist_ok=True)
+    print(f"输出目录: {args.output_dir}/")
 
     # ── 生成 LaTeX 表格 ──
     print("\n生成 LaTeX 表格...")
@@ -672,7 +671,7 @@ def main():
     else:
         print("\n生成图表...")
         # 尝试加载完整的预测数据
-        preds_path = os.path.join(OUT_DIR, "compare_predictions.npz")
+        preds_path = os.path.join(OUT_DIR, "paired", "compare_predictions.npz")
         if os.path.isfile(preds_path):
             data = np.load(preds_path)
             labels = data["labels"]

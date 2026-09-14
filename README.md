@@ -167,7 +167,7 @@ python eval_compare.py --eval-mode paired --paired-seed 12345 --mc-samples 30 --
 - **`--mc-samples 0`**：不做 MC Dropout，**不输出融合**（融合需要 σ_cnn）。  
 - **融合**：\( \theta = w\,\theta_{\mathrm{fft}} + (1-w)\,\theta_{\mathrm{cnn}} \)，\(w = \sigma/(\sigma+\tau)\)，`τ` = `--fusion-unc-scale`（度）。
 
-默认输出目录：`angle_cnn/outputs/`（`compare_report.txt`、`compare_scatter.png`、`compare_error.png`、`compare_summary.csv` 等）。
+评估输出按模式分别写入 `angle_cnn/outputs/paired/` 和 `angle_cnn/outputs/legacy/`（报告、图、摘要、`tau_sweep.csv`）。两种模式都需要运行，论文生成器才会生成对比表。现有 FFT 基线仍使用由测试标签计算的周期搜索窗口，结果属于带真值先验的诊断对比，不能称为盲测性能。τ 扫描同样只用于敏感性分析，正式融合参数应从独立验证集选择。
 
 ### 4. 合并论文用指标表
 
@@ -177,11 +177,14 @@ python export_thesis_table.py
 # → outputs/thesis_table_metrics.csv
 ```
 
-依赖：先运行 `train_cnn.py`（生成 `train_test_summary.csv`）与 `eval_compare.py`（生成 `compare_summary.csv`）。
+依赖：先运行 `train_cnn.py`（生成 `train_test_summary.csv`）与 `eval_compare.py --eval-mode paired`（生成 `paired/compare_summary.csv`）。完整论文表格还需 `legacy` 评估和鲁棒性结果；缺少实测数据时脚本会报错，不会生成填充数字。
 
 ### 5. 真实 AFM 数据推理（sim-to-real）
 
 ```bash
+# 先用实测扫描视野预处理；输出保留原分辨率 height_fft
+python preprocess_afm_data.py --input path/to/scan.tif --output data/afm_processed/ --fov-nm 300
+
 # 预处理后的 .npz 文件
 python inference_real_data.py --input-dir data/afm_processed/ --output real_results/
 
@@ -192,7 +195,7 @@ python inference_real_data.py --input-dir data/afm_raw/ --output real_results/ -
 python inference_real_data.py --input sample.npz --output real_results/
 ```
 
-同时运行 CNN（MC Dropout 不确定性）+ FFT + 融合（默认 τ=0.01°），输出 CSV 结果和每样本三栏预览图。
+同时运行 CNN（MC Dropout 不确定性）+ FFT + 融合（默认 τ=0.5°），输出 CSV 结果和每样本三栏预览图。必须提供可信的正方形扫描视野（nm）；CNN 使用与默认训练集相同的约 78.4 nm 中心裁剪，FFT 使用原始分辨率。低于训练像素分辨率或旧版不含 `height_fft` 的 NPZ 会报错。只有 height 通道时，缺失的 phase/amplitude 仍以 height 复制；结果须经真实标注样本验证，不能直接当实验精度。
 详细优化路线图：`angle_cnn/docs/sim_to_real_roadmap.md`。
 
 ### 6. 其它评测与工具
