@@ -46,7 +46,16 @@ class TestComputeStratifiedMetrics:
         m = compute_stratified_metrics(preds, labels)
         assert m.n_valid == 0
         assert m.failure_rate == 100.0
-        assert m.overall_mae == 0.0
+        assert np.isnan(m.overall_mae)
+
+    def test_infinite_prediction_counts_as_failure(self):
+        m = compute_stratified_metrics(np.array([1.0, np.inf]), np.array([1.0, 2.0]))
+        assert m.n_valid == 1
+        assert m.failure_rate == 50.0
+
+    def test_mismatched_lengths_rejected(self):
+        with pytest.raises(ValueError, match="equal-length"):
+            compute_stratified_metrics(np.array([1.0]), np.array([1.0, 2.0]))
 
     def test_percentile_errors(self):
         rng = np.random.default_rng(42)
@@ -143,6 +152,15 @@ class TestComputeCalibrationMetrics:
         cal = compute_calibration_metrics(preds, labels, uncs)
         # NaN is filtered out, only 2 valid
         assert cal["within_1sigma_pct"] >= 0
+
+    def test_small_sample_has_finite_calibration_mse(self):
+        cal = compute_calibration_metrics(np.array([1.1, 2.2]), np.array([1.0, 2.0]),
+                                          np.array([0.1, 0.2]), n_bins=10)
+        assert np.isfinite(cal["calibration_mse"])
+
+    def test_negative_uncertainty_rejected(self):
+        with pytest.raises(ValueError, match="non-negative"):
+            compute_calibration_metrics(np.array([1.0]), np.array([1.0]), np.array([-0.1]))
 
     def test_output_keys(self):
         preds = np.array([1.0, 2.0, 3.0], dtype=np.float32)

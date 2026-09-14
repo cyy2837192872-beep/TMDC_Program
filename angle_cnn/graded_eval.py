@@ -47,8 +47,8 @@ from angle_cnn.core.io_utils import require_file
 from angle_cnn.core.config import IMG_SIZE, THETA_MIN, THETA_MAX
 from angle_cnn.core.physics import A_NM, angle_uncertainty, FIXED_FOV_NM, pixels_per_moire_period
 from angle_cnn.core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire
-from moire_pipeline import extract_angle_fft
-from angle_cnn.core.cnn import predict_with_uncertainty
+from angle_cnn.moire_pipeline import extract_angle_fft
+from angle_cnn.core.cnn import predict_with_uncertainty, compute_fft_channel
 from angle_cnn.core.eval_utils import load_model_from_checkpoint, cnn_predict_single
 
 setup_matplotlib_cjk_font()

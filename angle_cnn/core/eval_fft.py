@@ -8,7 +8,7 @@ sibling-module dependencies.
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, maximum_filter
 
 from angle_cnn.core.config import (
     DEFAULT_BLUR_RANGE,
@@ -34,7 +34,63 @@ from angle_cnn.core.degrade import (
 )
 from angle_cnn.core.moire_sim import synthesize_reconstructed_moire
 from angle_cnn.core.physics import FIXED_FOV_NM, pixels_per_moire_period
-from angle_cnn.moire_pipeline import extract_angle_fft
+from angle_cnn.core.physics import moire_period, theta_from_period
+from angle_cnn.core.config import THETA_MIN, THETA_MAX
+from angle_cnn.moire_pipeline import extract_angle_fft, _subpixel_peak_2d
+
+
+def extract_angle_fft_blind(
+    image: np.ndarray,
+    fov_nm: float,
+    theta_range: tuple[float, float] = (THETA_MIN, THETA_MAX),
+) -> float:
+    """Estimate angle without using the sample's true angle or a guessed period.
+
+    The fixed protocol supplies only the measured FOV and supported angle range.
+    Six strong local spectral peaks must form one approximately hexagonal ring;
+    ambiguous or undersampled images return NaN and count as FFT failures.
+    """
+    image = np.asarray(image, dtype=np.float64)
+    if image.ndim != 2 or image.shape[0] != image.shape[1] or image.shape[0] < 128:
+        raise ValueError("FFT input must be a square image of at least 128 pixels")
+    if not np.all(np.isfinite(image)) or not np.isfinite(fov_nm) or fov_nm <= 0:
+        raise ValueError("FFT image and measured FOV must be finite and FOV positive")
+    lo, hi = theta_range
+    if not (0 < lo < hi):
+        raise ValueError("theta_range must be increasing and positive")
+
+    n = image.shape[0]
+    centered = (image - image.mean()) * np.outer(np.hanning(n), np.hanning(n))
+    power = np.abs(np.fft.fftshift(np.fft.fft2(centered))) ** 2
+    yy, xx = np.indices(power.shape)
+    radius = np.hypot(xx - n // 2, yy - n // 2)
+    r_min = max(2.0, 0.8 * fov_nm / moire_period(lo))
+    r_max = min(n / 3, 1.2 * fov_nm / moire_period(hi))
+    if r_max <= r_min:
+        return float("nan")
+    annulus = (radius >= r_min) & (radius <= r_max)
+    candidates = np.argwhere((power == maximum_filter(power, size=7)) & annulus)
+    if len(candidates) < 6:
+        return float("nan")
+    strengths = power[tuple(candidates.T)]
+    chosen = candidates[np.argsort(strengths)[-6:]]
+    refined = np.array([_subpixel_peak_2d(power, int(y), int(x)) for y, x in chosen])
+    vectors = refined - n // 2
+    radii = np.hypot(vectors[:, 0], vectors[:, 1])
+    median_radius = float(np.median(radii))
+    if np.max(np.abs(radii - median_radius)) > max(2.0, 0.12 * median_radius):
+        return float("nan")
+
+    angles = np.arctan2(vectors[:, 0], vectors[:, 1])
+    sector = np.pi / 3
+    turns = ((angles - angles[0]) % (2 * np.pi)) / sector
+    rounded = np.rint(turns)
+    if len(set((rounded.astype(int) % 6).tolist())) != 6:
+        return float("nan")
+    if np.max(np.abs(turns - rounded)) > 0.25:  # 15 degrees
+        return float("nan")
+    result = float(theta_from_period(fov_nm / float(np.mean(radii))))
+    return result
 
 
 def generate_fft_image_512(

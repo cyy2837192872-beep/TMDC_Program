@@ -32,7 +32,7 @@ from angle_cnn.core.physics import (
     pixels_per_moire_period,
 )
 from angle_cnn.core.moire_sim import synthesize_reconstructed_moire
-from moire_pipeline import extract_angle_fft
+from angle_cnn.moire_pipeline import extract_angle_fft
 from angle_cnn.core.cnn import build_model
 from angle_cnn.core.eval_utils import load_model_from_checkpoint
 

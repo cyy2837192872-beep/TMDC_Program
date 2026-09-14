@@ -13,8 +13,8 @@ eval_compare.py — MoS₂ moiré FFT vs CNN 角度提取公平对比评估（v3
 2) ``paired``（更公平）
   - 对每个测试角，用与数据集 **相同** 的 ``generate_sample`` 退化管线在 512 上生成同一场景，
     CNN 取 **中心裁剪** 128，FFT 用该场景的 **height 全幅 512**。
-  - 说明：仍用真值 θ 计算 ``ppp = n·L/fov``（与 ``extract_angle_fft`` 定义一致）；若需完全无标签先验，应再实现
-    “由图像自估计周期/网格”的 FFT 设置（可作为后续工作）。
+  - paired FFT 只用图像、实测 FOV 和预定角度范围定位六重对称峰，不使用测试标签设定搜索环。
+  - legacy FFT 保留按真值 θ 设置周期窗口的历史口径，仅供诊断和旧结果对照。
 
 融合（可选，需 ``--mc-samples > 0`` 以得到 σ_cnn）::
 
@@ -46,6 +46,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from angle_cnn.core.eval_fft import (
     extract_angle_fft_robust,
+    extract_angle_fft_blind,
     fft_predict_batch_512,
     generate_fft_image_512,
 )
@@ -355,6 +356,8 @@ def _residual_correlation(
         return float("nan")
     fft_resid = labels[mask] - fft_preds[mask]
     cnn_resid = labels[mask] - cnn_preds[mask]
+    if np.std(fft_resid) == 0 or np.std(cnn_resid) == 0:
+        return float("nan")
     return float(np.corrcoef(fft_resid, cnn_resid)[0, 1])
 
 
@@ -370,6 +373,7 @@ def save_report(
     eval_mode: str = "legacy",
     fusion_preds: np.ndarray | None = None,
     fusion_unc_scale: float = 0.5,
+    fft128_preds: np.ndarray | None = None,
 ):
     path = os.path.join(OUT_DIR, "compare_report.txt")
     fft_metrics = compute_stratified_metrics(fft_preds, labels, theta_min=THETA_MIN, theta_max=THETA_MAX)
@@ -391,11 +395,17 @@ def save_report(
         f.write("对比方法：\n")
         if eval_mode == "paired":
             f.write("  CNN：与训练相同的退化管线，同一场景 128×128 中心裁剪\n")
-            f.write("  FFT：同一场景 height 通道 512×512（训练分布内退化）\n")
+            f.write("  FFT512：同一场景 height 全图；FFT128：与 CNN 同视野 height 中心裁剪（均无真值先验）\n")
         else:
             f.write("  CNN：数据集中 128×128 图像（与训练一致）\n")
             f.write("  FFT：按标签单独重算 512×512 高度图（训练分布内退化）\n")
         f.write("退化条件：高斯噪声 + 仿射畸变 + 高斯模糊 + 探针卷积 + 1/f噪声 + …\n\n")
+        if fft128_preds is not None:
+            valid128 = np.isfinite(fft128_preds)
+            f.write(f"同视野 FFT128 有效数: {valid128.sum()}/{len(valid128)}；")
+            f.write(f"失败率: {(~valid128).mean() * 100:.1f}%；")
+            f.write((f"有效样本 MAE: {np.abs(fft128_preds[valid128] - labels[valid128]).mean():.4f}°\n\n"
+                     if valid128.any() else "有效样本 MAE: 不可用\n\n"))
 
         f.write(f'{"指标":<20} {"FFT":>12} {"CNN":>12}\n')
         f.write("-" * 46 + "\n")
@@ -465,7 +475,7 @@ def save_report(
     csv_path = os.path.join(OUT_DIR, "compare_summary.csv")
     row = {
         "eval_mode": eval_mode,
-        "fft_period_prior": "ground_truth_angle",
+        "fft_period_prior": "none" if eval_mode == "paired" else "ground_truth_angle",
         "n_samples": int(len(labels)),
         "fft_valid": int(fft_valid.sum()),
         "cnn_valid": int(np.isfinite(cnn_preds).sum()),
@@ -493,6 +503,12 @@ def save_report(
         "residual_correlation": resid_corr if np.isfinite(resid_corr) else float("nan"),
         "fusion_unc_scale": float(fusion_unc_scale),
     }
+    if fft128_preds is not None:
+        valid128 = np.isfinite(fft128_preds)
+        row["fft128_valid"] = int(valid128.sum())
+        row["fft128_fail_rate_pct"] = float((~valid128).mean() * 100)
+        row["fft128_mae_deg"] = (float(np.mean(np.abs(fft128_preds[valid128] - labels[valid128])))
+                                 if valid128.any() else float("nan"))
     if fusion_preds is not None and fusion_metrics is not None:
         fusion_err = np.abs(fusion_preds - labels)
         row.update({
@@ -525,7 +541,7 @@ def main():
     parser.add_argument(
         "--eval-mode",
         choices=("legacy", "paired"),
-        default="legacy",
+        default="paired",
         help="legacy：CNN 用 .npz 图像、FFT 单独重算；paired：同一场景中心裁 CNN + 整幅 FFT",
     )
     parser.add_argument("--paired-seed", type=int, default=12345, help="paired 模式下每样本子种子基准")
@@ -572,16 +588,18 @@ def main():
         raise ValueError(f"checkpoint expects {base_n_ch} base channels, dataset has {n_ch}")
 
     fft_preds: np.ndarray
+    fft128_preds: np.ndarray | None = None
     cnn_input: np.ndarray
 
     if cli_args.eval_mode == "paired":
         print("\n[paired] 生成同场景配对样本（较慢）并 FFT 提角…")
         paired_list: list[np.ndarray] = []
         fft_list: list[float] = []
+        fft128_list: list[float] = []
         for i in range(len(labels_test)):
             theta_deg = float(labels_test[i])
             rng = np.random.default_rng(_subseed(cli_args.paired_seed, i))
-            img_cnn, h512, fov_nm, actual_ppp = generate_sample_paired_cnn_fft(
+            img_cnn, h512, fov_nm, _actual_ppp = generate_sample_paired_cnn_fft(
                 theta_deg,
                 rng,
                 img_size=128,
@@ -591,11 +609,15 @@ def main():
                 n_sim=512,
             )
             paired_list.append(img_cnn)
-            fft_list.append(extract_angle_fft_robust(h512, fov_nm=fov_nm, actual_ppp=actual_ppp))
+            fft_list.append(extract_angle_fft_blind(h512, fov_nm=fov_nm))
+            center = (h512.shape[0] - 128) // 2
+            h128 = h512[center:center + 128, center:center + 128]
+            fft128_list.append(extract_angle_fft_blind(h128, fov_nm=fov_nm * 128 / h512.shape[0]))
             if (i + 1) % 500 == 0:
                 print(f"  paired 进度: {i + 1}/{len(labels_test)}")
         cnn_input = np.stack(paired_list, axis=0)
         fft_preds = np.array(fft_list, dtype=np.float32)
+        fft128_preds = np.array(fft128_list, dtype=np.float32)
     else:
         cnn_input = images_test
         print("\n[2] FFT 提取（512×512 重新生成，legacy 口径）...")
@@ -621,6 +643,10 @@ def main():
     if cli_args.eval_mode == "paired":
         n_fail = np.isnan(fft_preds).sum()
         print(f"\n  paired FFT 失败 {n_fail}/{len(fft_preds)} 张")
+        valid128 = np.isfinite(fft128_preds)
+        print(f"  同视野 FFT128: 有效 {valid128.sum()}/{len(valid128)}",
+              f"MAE={np.abs(fft128_preds[valid128] - labels_test[valid128]).mean():.4f}°"
+              if valid128.any() else "MAE=不可用")
 
     fusion_preds = None
     if cnn_stds is not None:
@@ -661,6 +687,7 @@ def main():
         eval_mode=cli_args.eval_mode,
         fusion_preds=fusion_preds,
         fusion_unc_scale=cli_args.fusion_unc_scale,
+        fft128_preds=fft128_preds,
     )
 
     print("\n" + "=" * 60)
@@ -683,6 +710,7 @@ def main():
             cnn_stds=cnn_stds if cnn_stds is not None else np.array([]),
             fusion_preds=fusion_preds if fusion_preds is not None else np.array([]),
             eval_mode=cli_args.eval_mode,
+            fft128_preds=fft128_preds if fft128_preds is not None else np.array([]),
         )
         print(f"  预测已保存: {pred_save_path}")
 

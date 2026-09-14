@@ -596,8 +596,18 @@ def main():
     compare_paired, compare_legacy = paired_rows[0], legacy_rows[0]
     if compare_paired.get("eval_mode") != "paired" or compare_legacy.get("eval_mode") != "legacy":
         raise ValueError("compare_summary.csv 的 eval_mode 与目录不符")
+    if compare_paired.get("fft_period_prior") != "none" or compare_legacy.get("fft_period_prior") != "ground_truth_angle":
+        raise ValueError("评估文件缺少明确的 FFT 搜索先验，或 paired 结果仍使用真值先验；请重新评估")
     if not train or not robust or not report:
         raise ValueError("缺少训练汇总、鲁棒性结果或 paired 评估报告；无法生成论文表格")
+    if not _parse_angle_bins(report):
+        raise ValueError("paired 评估报告缺少角度分箱数据")
+    for row in robust:
+        for key in ("dim", "level", "fft512_mae_deg", "cnn_mae_deg", "is_ood"):
+            if key not in row or row[key] == "":
+                raise ValueError(f"鲁棒性结果缺少 {key}")
+        for key in ("level", "fft512_mae_deg", "cnn_mae_deg"):
+            _num(row[key])
 
     # 解析角度分箱
     bins = _parse_angle_bins(report)

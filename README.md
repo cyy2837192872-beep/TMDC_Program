@@ -157,17 +157,17 @@ python check_regression.py --save-baseline    # 更新基准
 ### 3. FFT vs CNN 评估（两种口径 + 融合）
 
 ```bash
-# legacy：CNN 用 .npz 测试集图；FFT 按标签单独重算 512（与历史表格兼容）
-python eval_compare.py --mc-samples 30
+# legacy：CNN 用 .npz 测试集图；FFT 按标签单独重算 512，并用真值设置搜索窗口（仅历史对照）
+python eval_compare.py --eval-mode legacy --mc-samples 30
 
-# paired：同一随机退化场景 → CNN 中心 128 + 同场景 height@512（更公平）
+# paired（默认）：同一随机退化场景 → CNN 中心 128 + 同场景 height@512；FFT 不使用真值周期
 python eval_compare.py --eval-mode paired --paired-seed 12345 --mc-samples 30 --fusion-unc-scale 0.5
 ```
 
 - **`--mc-samples 0`**：不做 MC Dropout，**不输出融合**（融合需要 σ_cnn）。  
 - **融合**：\( \theta = w\,\theta_{\mathrm{fft}} + (1-w)\,\theta_{\mathrm{cnn}} \)，\(w = \sigma/(\sigma+\tau)\)，`τ` = `--fusion-unc-scale`（度）。
 
-评估输出按模式分别写入 `angle_cnn/outputs/paired/` 和 `angle_cnn/outputs/legacy/`（报告、图、摘要、`tau_sweep.csv`）。两种模式都需要运行，论文生成器才会生成对比表。现有 FFT 基线仍使用由测试标签计算的周期搜索窗口，结果属于带真值先验的诊断对比，不能称为盲测性能。τ 扫描同样只用于敏感性分析，正式融合参数应从独立验证集选择。
+评估输出按模式分别写入 `angle_cnn/outputs/paired/` 和 `angle_cnn/outputs/legacy/`（报告、图、摘要、`tau_sweep.csv`）。两种模式都需要运行，论文生成器才会生成对比表。paired 使用盲 FFT：只给定图像、实测 FOV 和预先固定的 0.5°–5° 范围，要求六个峰构成同一六重对称环；另记录与 CNN 同中心视野的 FFT128 有效数、失败率和 MAE。legacy 仍用测试标签限定搜索，仅用于历史诊断。两种模式的场景与先验不同，不应把差值归因于配对本身。τ 扫描只用于敏感性分析，正式融合参数应从独立验证集选择。
 
 ### 4. 合并论文用指标表
 
@@ -195,7 +195,7 @@ python inference_real_data.py --input-dir data/afm_raw/ --output real_results/ -
 python inference_real_data.py --input sample.npz --output real_results/
 ```
 
-同时运行 CNN（MC Dropout 不确定性）+ FFT + 融合（默认 τ=0.5°），输出 CSV 结果和每样本三栏预览图。必须提供可信的正方形扫描视野（nm）；CNN 使用与默认训练集相同的约 78.4 nm 中心裁剪，FFT 使用原始分辨率。低于训练像素分辨率或旧版不含 `height_fft` 的 NPZ 会报错。只有 height 通道时，缺失的 phase/amplitude 仍以 height 复制；结果须经真实标注样本验证，不能直接当实验精度。
+同时运行 CNN（MC Dropout 不确定性）+ 盲 FFT + 融合（默认 τ=0.5°），输出 CSV 结果和每样本三栏预览图。必须提供可信的正方形扫描视野（nm）；CNN 使用与默认训练集相同的约 78.4 nm 中心裁剪，FFT 使用原始分辨率。低于训练像素分辨率或旧版不含 `height_fft` 的 NPZ 会报错。只有 height 通道时，缺失的 phase/amplitude 仍以 height 复制；结果须经真实标注样本验证，不能直接当实验精度。
 详细优化路线图：`angle_cnn/docs/sim_to_real_roadmap.md`。
 
 ### 6. 其它评测与工具

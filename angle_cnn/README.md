@@ -37,7 +37,7 @@ python train_cnn.py --fp16-data --num-workers 0 --batch-size 256 --no-compile \
 # 2) 仅重跑测试 + MC（需已有 outputs/best_model.pt）
 python train_cnn.py --eval-only --mc-samples 30
 
-# 3) FFT vs CNN 公平对比（需 best_model.pt）
+# 3) FFT vs CNN 对比（需 best_model.pt；paired 使用盲 FFT）
 python eval_compare.py --eval-mode paired --mc-samples 30
 python eval_compare.py --eval-mode legacy --mc-samples 30
 

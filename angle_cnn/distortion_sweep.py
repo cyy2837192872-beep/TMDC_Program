@@ -34,7 +34,7 @@ from angle_cnn.core.config import IMG_SIZE
 from angle_cnn.core.physics import FIXED_FOV_NM, pixels_per_moire_period
 from angle_cnn.core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire
 from angle_cnn.core.eval_utils import load_model_from_checkpoint, cnn_predict_single
-from moire_pipeline import extract_angle_fft
+from angle_cnn.moire_pipeline import extract_angle_fft
 
 # Will be set at runtime from checkpoint metadata
 _N_CHANNELS = 1

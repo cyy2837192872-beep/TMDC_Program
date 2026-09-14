@@ -5,6 +5,7 @@ import pytest
 
 from angle_cnn.core.afm_preprocess import TRAIN_CROP_FOV_NM, prepare_afm_channels
 from angle_cnn.core.fusion import fuse_angles
+from angle_cnn.core.eval_fft import extract_angle_fft_blind, generate_fft_image_512
 from angle_cnn.inference_real_data import load_preprocessed_npz
 
 
@@ -38,3 +39,19 @@ def test_fusion_is_shared_and_nan_fft_falls_back_to_cnn():
                                 np.array([0.5, 0.5]), 0.5)
     np.testing.assert_allclose(fused, [1.5, 1.0])
     np.testing.assert_allclose(weight, [0.5, 0.0])
+
+
+@pytest.mark.parametrize("theta", [0.5, 2.0, 5.0])
+def test_blind_fft_recovers_degraded_synthetic_angles(theta):
+    image, fov_nm, _oracle_ppp = generate_fft_image_512(theta, np.random.default_rng(2))
+    estimate = extract_angle_fft_blind(image, fov_nm)
+    assert np.isfinite(estimate)
+    assert abs(estimate - theta) < 0.08
+
+
+def test_blind_fft_rejects_nonhexagonal_spectra():
+    rng = np.random.default_rng(4)
+    assert np.isnan(extract_angle_fft_blind(rng.normal(size=(512, 512)), 313.6))
+    x = np.arange(512)
+    stripes = np.tile(np.sin(2 * np.pi * x / 20), (512, 1))
+    assert np.isnan(extract_angle_fft_blind(stripes, 313.6))

@@ -57,9 +57,8 @@ from angle_cnn.core.cnn import (
     predict_with_uncertainty,
 )
 from angle_cnn.core.config import THETA_MIN, THETA_MAX
-from angle_cnn.core.eval_fft import extract_angle_fft_robust
+from angle_cnn.core.eval_fft import extract_angle_fft_blind
 from angle_cnn.core.io_utils import load_model_checkpoint, state_dict_from_checkpoint
-from angle_cnn.core.physics import FIXED_FOV_NM, pixels_per_moire_period
 from angle_cnn.core.afm_preprocess import prepare_afm_channels
 from angle_cnn.core.fusion import fuse_angles
 
@@ -254,14 +253,11 @@ def run_fft_inference(height_ch: np.ndarray, fov_nm: float) -> float:
     if h != w or h < 256:
         raise ValueError("FFT requires an original square scan of at least 256 pixels")
     img_512 = height_ch.astype(np.float64)
-    n_px = h
 
     # 归一化
     img_512 = (img_512 - img_512.min()) / (img_512.max() - img_512.min() + 1e-9)
 
-    ppp_est = pixels_per_moire_period(n_px, 2.0, fov_nm)  # fixed, label-independent reference
-    angle = extract_angle_fft_robust(img_512, fov_nm=fov_nm, actual_ppp=max(4.0, ppp_est))
-    return angle
+    return extract_angle_fft_blind(img_512, fov_nm=fov_nm)
 
 
 # ── 融合 ──────────────────────────────────────────────────────
@@ -338,6 +334,8 @@ def save_preview(image: np.ndarray, cnn_angle: float, cnn_unc: float,
 
 def main():
     args = parse_args()
+    if args.mc_samples < 2:
+        raise ValueError("--mc-samples must be at least 2 for uncertainty-weighted fusion")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     import torch

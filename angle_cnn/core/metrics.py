@@ -54,14 +54,14 @@ class StratifiedMetrics:
         失败率（NaN 预测比例）
     """
 
-    overall_mae: float = 0.0
-    median_error: float = 0.0
+    overall_mae: float = float("nan")
+    median_error: float = float("nan")
     percentile_errors: Dict[int, float] = field(default_factory=dict)
     angle_bin_mae: Dict[float, float] = field(default_factory=dict)
-    small_angle_mae: float = 0.0
-    large_angle_mae: float = 0.0
-    error_std: float = 0.0
-    max_error: float = 0.0
+    small_angle_mae: float = float("nan")
+    large_angle_mae: float = float("nan")
+    error_std: float = float("nan")
+    max_error: float = float("nan")
     failure_rate: float = 0.0
     n_samples: int = 0
     n_valid: int = 0
@@ -71,10 +71,10 @@ class StratifiedMetrics:
         return {
             "overall_mae": self.overall_mae,
             "median_error": self.median_error,
-            "p50": self.percentile_errors.get(50, 0.0),
-            "p90": self.percentile_errors.get(90, 0.0),
-            "p95": self.percentile_errors.get(95, 0.0),
-            "p99": self.percentile_errors.get(99, 0.0),
+            "p50": self.percentile_errors.get(50, float("nan")),
+            "p90": self.percentile_errors.get(90, float("nan")),
+            "p95": self.percentile_errors.get(95, float("nan")),
+            "p99": self.percentile_errors.get(99, float("nan")),
             "small_angle_mae": self.small_angle_mae,
             "large_angle_mae": self.large_angle_mae,
             "error_std": self.error_std,
@@ -89,9 +89,9 @@ class StratifiedMetrics:
         lines = [
             f"整体 MAE:     {self.overall_mae:.4f}°",
             f"中位误差:     {self.median_error:.4f}°",
-            f"P90 误差:     {self.percentile_errors.get(90, 0.0):.4f}°",
-            f"P95 误差:     {self.percentile_errors.get(95, 0.0):.4f}°",
-            f"P99 误差:     {self.percentile_errors.get(99, 0.0):.4f}°",
+            f"P90 误差:     {self.percentile_errors.get(90, float('nan')):.4f}°",
+            f"P95 误差:     {self.percentile_errors.get(95, float('nan')):.4f}°",
+            f"P99 误差:     {self.percentile_errors.get(99, float('nan')):.4f}°",
             f"小角度 MAE:   {self.small_angle_mae:.4f}° (θ < 1.5°)",
             f"大角度 MAE:   {self.large_angle_mae:.4f}° (θ > 3.5°)",
             f"误差 std:     {self.error_std:.4f}°",
@@ -139,9 +139,11 @@ def compute_stratified_metrics(
     """
     predictions = np.asarray(predictions, dtype=np.float32)
     labels = np.asarray(labels, dtype=np.float32)
+    if predictions.shape != labels.shape or predictions.ndim != 1:
+        raise ValueError("predictions and labels must be equal-length 1D arrays")
 
     n_samples = len(labels)
-    valid_mask = ~np.isnan(predictions) & ~np.isnan(labels)
+    valid_mask = np.isfinite(predictions) & np.isfinite(labels)
     n_valid = valid_mask.sum()
 
     if n_valid == 0:
@@ -229,12 +231,31 @@ def compute_calibration_metrics(
     dict
         校准指标
     """
-    valid = ~np.isnan(predictions) & ~np.isnan(labels) & ~np.isnan(uncertainties)
+    predictions = np.asarray(predictions, dtype=float)
+    labels = np.asarray(labels, dtype=float)
+    uncertainties = np.asarray(uncertainties, dtype=float)
+    if predictions.shape != labels.shape or predictions.shape != uncertainties.shape or predictions.ndim != 1:
+        raise ValueError("predictions, labels and uncertainties must be equal-length 1D arrays")
+    if np.any(np.isfinite(uncertainties) & (uncertainties < 0)):
+        raise ValueError("uncertainties must be non-negative")
+    if n_bins < 1:
+        raise ValueError("n_bins must be positive")
+    valid = np.isfinite(predictions) & np.isfinite(labels) & np.isfinite(uncertainties)
     preds = predictions[valid]
     labs = labels[valid]
     uncs = uncertainties[valid]
 
     errors = np.abs(preds - labs)
+    if not len(errors):
+        return {
+            "within_1sigma_pct": float("nan"),
+            "within_2sigma_pct": float("nan"),
+            "within_3sigma_pct": float("nan"),
+            "error_uncertainty_correlation": float("nan"),
+            "calibration_mse": float("nan"),
+            "expected_1sigma": 68.27,
+            "expected_2sigma": 95.45,
+        }
 
     # 覆盖率：误差在 nσ 内的比例
     within_1sigma = (errors <= uncs).mean()
@@ -243,21 +264,17 @@ def compute_calibration_metrics(
 
     # 校准误差：预测误差与不确定性的相关性
     # 理想情况下，高不确定性应对应大误差
-    correlation = np.corrcoef(errors, uncs)[0, 1] if len(errors) > 1 else 0.0
+    correlation = (float(np.corrcoef(errors, uncs)[0, 1])
+                   if len(errors) > 1 and errors.std() > 0 and uncs.std() > 0
+                   else float("nan"))
 
     # 分位数校准曲线
     unc_ranks = np.argsort(uncs)
-    n = len(uncs)
-    bin_size = n // n_bins
-
     calibration_curve = []
-    for i in range(n_bins):
-        start = i * bin_size
-        end = start + bin_size if i < n_bins - 1 else n
-        bin_idx = unc_ranks[start:end]
+    for bin_idx in np.array_split(unc_ranks, min(n_bins, len(uncs))):
         mean_unc = uncs[bin_idx].mean()
-        mean_err = errors[bin_idx].mean()
-        calibration_curve.append((mean_unc, mean_err))
+        rmse = np.sqrt(np.mean(errors[bin_idx] ** 2))
+        calibration_curve.append((mean_unc, rmse))
 
     # 校准均方误差
     cal_mse = np.mean([(u - e) ** 2 for u, e in calibration_curve])

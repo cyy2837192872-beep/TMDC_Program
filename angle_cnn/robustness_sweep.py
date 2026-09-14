@@ -38,7 +38,7 @@ from angle_cnn.core.config import IMG_SIZE, THETA_MAX, THETA_MIN
 from angle_cnn.core.physics import FIXED_FOV_NM
 from angle_cnn.core.eval_utils import load_model_from_checkpoint
 from angle_cnn.core.physics import pixels_per_moire_period
-from dataset_generator import (
+from angle_cnn.dataset_generator import (
     DEFAULT_BLUR_RANGE,
     DEFAULT_NOISE_RANGE,
     DEFAULT_ONEOVERF_RANGE,
@@ -217,7 +217,8 @@ def run_sweep(
                         fft128_errs.append(abs(th_fft128 - theta))
 
                     # CNN
-                    x = torch.from_numpy(img_cnn).unsqueeze(0).float().to(device)
+                    x = torch.from_numpy(img_cnn).float().to(device)
+                    x = x.unsqueeze(0).unsqueeze(0) if x.ndim == 2 else x.unsqueeze(0)
                     if add_fft_channel:
                         from angle_cnn.core.cnn import compute_fft_channel
                         x = compute_fft_channel(x)

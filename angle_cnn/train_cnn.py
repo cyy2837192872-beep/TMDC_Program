@@ -56,6 +56,7 @@ import os
 import shutil
 import sys
 import time
+from functools import partial
 
 import numpy as np
 import torch
@@ -547,7 +548,7 @@ def main():
     show_batch_pb = _batch_progress_enabled(args.no_progress)
     print(f"  batch tqdm:    {'开启' if show_batch_pb else '关闭'}")
 
-    w_init = lambda wid: worker_init_fn(wid, args.seed)  # noqa: E731
+    w_init = partial(worker_init_fn, base_seed=args.seed)
 
     persist = nw > 0
     prefetch = prefetch_eff if nw > 0 else None
@@ -673,11 +674,12 @@ def main():
                 progress=show_batch_pb, desc=f"ep{epoch} val",
                 huber_delta=args.huber_delta, angle_loss_weight=angle_loss_w,
             )
-            scheduler.step()
             if args.swa and swa_model is not None and epoch >= swa_start:
                 swa_model.update_parameters(model)
                 if swa_scheduler is not None:
                     swa_scheduler.step()
+            else:
+                scheduler.step()
 
             lr = optimizer.param_groups[0]["lr"]
             dt = time.time() - t0
@@ -733,10 +735,13 @@ def main():
                 break
 
         # SWA 最终化：用训练集更新 BN 统计量，然后评估
-        if args.swa and swa_model is not None:
+        if args.swa and swa_model is not None and int(swa_model.n_averaged.item()) > 0:
             import torch.optim.swa_utils as swa_utils
             print(f"\nSWA 最终化：用训练集更新 BN 统计量...")
-            swa_utils.update_bn(train_loader, swa_model, device=device)
+            bn_batches = (
+                (compute_fft_channel(imgs), labels) for imgs, labels in train_loader
+            ) if add_fft else train_loader
+            swa_utils.update_bn(bn_batches, swa_model, device=device)
             swa_val_loss, swa_val_mae = evaluate(
                 swa_model, val_loader, device,
                 use_amp=use_amp, amp_dtype=amp_dtype, add_fft_channel=add_fft,
