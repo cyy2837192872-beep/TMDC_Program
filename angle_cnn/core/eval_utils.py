@@ -26,7 +26,7 @@ def load_model_from_checkpoint(
     n_ch = int(meta.get("n_channels", 1))
     dropout = float(meta.get("dropout", 0.3))
     add_fft = bool(meta.get("add_fft_channel", False))
-    base_n_ch = int(meta.get("base_n_channels", n_ch))
+    base_n_ch = int(meta.get("base_n_channels", n_ch - int(add_fft)))
     arch = str(meta.get("arch", "resnet18"))
 
     model = build_model(n_channels=n_ch, dropout=dropout, arch=arch).to(device)

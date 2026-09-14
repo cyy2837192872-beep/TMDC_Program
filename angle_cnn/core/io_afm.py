@@ -27,9 +27,9 @@ from scipy.ndimage import gaussian_filter, median_filter
 logger = logging.getLogger(__name__)
 
 # Channel name aliases used by Cypher ES Tapping Mode exports.
-_HEIGHT_ALIASES = {"Height", "HeightRetrace", "ZSensor", "ZSensorRetrace"}
-_PHASE_ALIASES = {"Phase", "PhaseRetrace", "Phase1", "Phase1Retrace"}
-_AMPLITUDE_ALIASES = {"Amplitude", "AmplitudeRetrace", "Amp", "AmpRetrace"}
+_HEIGHT_ALIASES = ("Height", "HeightRetrace", "ZSensor", "ZSensorRetrace")
+_PHASE_ALIASES = ("Phase", "PhaseRetrace", "Phase1", "Phase1Retrace")
+_AMPLITUDE_ALIASES = ("Amplitude", "AmplitudeRetrace", "Amp", "AmpRetrace")
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +61,9 @@ def load_ibw(path: str) -> dict:
     note = wave["wave"].get("note", b"")
     if isinstance(note, bytes):
         note = note.decode("utf-8", errors="replace")
-    name = wave["wave"]["wave_header"].get("bname", b"").decode("utf-8", errors="replace")
+    name = wave["wave"].get("wave_header", {}).get("bname", b"")
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", errors="replace")
     return {"data": np.asarray(data, dtype=np.float64), "note": note, "name": name}
 
 
@@ -104,8 +106,13 @@ def load_cypher_image(
     if data.ndim == 2:
         channels[raw["name"] or "Height"] = data
     elif data.ndim == 3:
-        n_ch = data.shape[2] if data.shape[2] < data.shape[0] else data.shape[0]
-        ch_axis = 2 if data.shape[2] < data.shape[0] else 0
+        if data.shape[0] == data.shape[1] and data.shape[2] < data.shape[0]:
+            ch_axis = 2
+        elif data.shape[1] == data.shape[2] and data.shape[0] < data.shape[1]:
+            ch_axis = 0
+        else:
+            raise ValueError(f"Ambiguous or non-square IBW channel layout: {data.shape}")
+        n_ch = data.shape[ch_axis]
         channel_names = _guess_channel_names(meta, n_ch)
         for i in range(n_ch):
             if ch_axis == 2:
@@ -113,7 +120,7 @@ def load_cypher_image(
             else:
                 channels[channel_names[i]] = data[i]
     else:
-        channels["data"] = data
+        raise ValueError(f"Unsupported IBW dimensions: {data.shape}")
 
     if return_metadata:
         return channels, meta

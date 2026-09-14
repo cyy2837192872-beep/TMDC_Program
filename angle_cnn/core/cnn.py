@@ -103,6 +103,8 @@ def predict_with_uncertainty(
     mean_deg : (batch,) predicted angle in degrees.
     std_deg  : (batch,) epistemic uncertainty in degrees.
     """
+    if n_samples < 2:
+        raise ValueError("MC Dropout uncertainty requires at least 2 samples")
     model.eval()
     enable_mc_dropout(model)
     preds = []
@@ -124,4 +126,3 @@ def warmup_cosine_lr(epoch: int, warmup: int, total: int, min_ratio: float = 0.0
         return (epoch + 1) / max(1, warmup)
     progress = (epoch - warmup) / max(1, total - warmup)
     return min_ratio + 0.5 * (1 - min_ratio) * (1 + math.cos(math.pi * progress))
-

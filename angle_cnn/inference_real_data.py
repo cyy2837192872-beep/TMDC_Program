@@ -57,9 +57,10 @@ from angle_cnn.core.cnn import (
     predict_with_uncertainty,
 )
 from angle_cnn.core.config import THETA_MIN, THETA_MAX
-from angle_cnn.core.eval_fft import extract_angle_fft_robust
+from angle_cnn.core.eval_fft import extract_angle_fft_blind
 from angle_cnn.core.io_utils import load_model_checkpoint, state_dict_from_checkpoint
-from angle_cnn.core.physics import FIXED_FOV_NM, pixels_per_moire_period
+from angle_cnn.core.afm_preprocess import TRAIN_CROP_FOV_NM, prepare_afm_channels
+from angle_cnn.core.fusion import fuse_angles
 
 
 def parse_args():
@@ -75,12 +76,12 @@ def parse_args():
                         help="输出目录")
     parser.add_argument("--model", type=str, default=None,
                         help="CNN 权重路径（默认 outputs/best_model.pt）")
-    parser.add_argument("--tau", type=float, default=0.01,
-                        help="融合阈值 τ（°），τ 扫描最优值 0.01°")
+    parser.add_argument("--tau", type=float, default=0.5,
+                        help="融合阈值 τ（°）；应在独立验证集上预先选定")
     parser.add_argument("--mc-samples", type=int, default=30,
                         help="MC Dropout 采样次数")
     parser.add_argument("--fov-nm", type=float, default=None,
-                        help="FFT 用视野（nm），优先从元数据读取，未提供时尝试自动估计")
+                        help="实测扫描视野边长（nm）；覆盖文件元数据，缺失则报错")
     parser.add_argument("--raw", action="store_true",
                         help="输入为原始 AFM 文件（非预处理 npz），需要 igor2/PIL 支持")
     parser.add_argument("--no-preview", action="store_true",
@@ -99,7 +100,7 @@ def _progress(iterable, desc: str = "", **kwargs):
 # ── 加载器 ────────────────────────────────────────────────────
 
 
-def load_preprocessed_npz(path: str) -> tuple[np.ndarray, dict]:
+def load_preprocessed_npz(path: str) -> tuple[np.ndarray, np.ndarray, dict]:
     """加载 preprocess_afm_data.py 输出的 .npz 文件。
 
     Returns
@@ -107,77 +108,58 @@ def load_preprocessed_npz(path: str) -> tuple[np.ndarray, dict]:
     image : (3, 128, 128) float32, 归一化到 [0, 1]
     meta  : metadata dict
     """
-    data = np.load(path)
-    image = data["image"]
-    meta = json.loads(str(data.get("metadata", "{}")))
-    return image, meta
+    with np.load(path) as data:
+        if "height_fft" not in data:
+            raise ValueError("旧版 NPZ 缺少原分辨率 height_fft；请重新运行 preprocess_afm_data")
+        image = data["image"]
+        height_fft = data["height_fft"]
+        meta = json.loads(str(data.get("metadata", "{}")))
+    if image.shape != (3, 128, 128) or height_fft.ndim != 2 or height_fft.shape[0] != height_fft.shape[1]:
+        raise ValueError("NPZ image/height_fft shape invalid; rerun preprocessing")
+    if height_fft.shape[0] < 256 or not np.all(np.isfinite(image)) or not np.all(np.isfinite(height_fft)):
+        raise ValueError("NPZ scan is undersampled or contains non-finite pixels")
+    return image, height_fft, meta
 
 
-def load_raw_as_npz(filepath: str, target_size: int = 128) -> tuple[np.ndarray, dict]:
+def load_raw_as_npz(
+    filepath: str, fov_nm: float | None = None, crop_fov_nm: float = TRAIN_CROP_FOV_NM,
+) -> tuple[np.ndarray, np.ndarray, dict]:
     """直接加载原始 AFM 文件并预处理为 (3, 128, 128) 格式。
 
     优先使用 core.io_afm 的 Cypher ES 解析器；回退到 PIL。
     """
-    from angle_cnn.core.io_afm import (
-        find_channel,
-        load_cypher_image,
-        preprocess_afm_image,
-    )
-    from angle_cnn.preprocess_afm_data import (
-        load_ibw_file,
-        load_image_file,
-        load_spm_file,
-    )
+    from angle_cnn.core.io_afm import find_channel
+    from angle_cnn.preprocess_afm_data import load_ibw_file, load_image_file, load_spm_file
 
     ext = Path(filepath).suffix.lower()
     channels = {}
     meta = {}
-
     if ext == ".ibw":
-        try:
-            result = load_cypher_image(filepath, return_metadata=True)
-            if isinstance(result, tuple):
-                channels, meta = result
-            else:
-                channels = result
-        except Exception:
-            channels, _ = load_ibw_file(filepath)
+        channels, metadata = load_ibw_file(filepath)
+        meta = vars(metadata)
     elif ext == ".spm":
-        channels, _ = load_spm_file(filepath)
+        channels, metadata = load_spm_file(filepath)
+        meta = vars(metadata)
     elif ext in (".tiff", ".tif", ".png", ".jpg", ".jpeg", ".bmp"):
-        channels, _ = load_image_file(filepath)
+        channels, metadata = load_image_file(filepath)
+        meta = vars(metadata)
     else:
         raise ValueError(f"不支持的文件格式: {ext}")
 
     if not channels:
         raise RuntimeError(f"无法加载文件: {filepath}")
+    selected = {}
+    for name in ("height", "phase", "amplitude"):
+        found = find_channel(channels, name)
+        if found is not None:
+            selected[name] = found
+    channels = selected
 
-    # 提取 height 通道，用 io_afm 标准流程预处理
-    height = find_channel(channels, "height") if "find_channel" in dir() else channels.get(list(channels.keys())[0])
-    if height is None:
-        height = list(channels.values())[0]
-        logging.warning("未找到 height 通道，使用第一个通道")
-
-    height_pp = preprocess_afm_image(height)
-
-    # 构建 3 通道（height + 复制）
-    from angle_cnn.preprocess_afm_data import preprocess_image as pp_single
-    h = pp_single(height_pp, target_size)
-
-    phase = find_channel(channels, "phase")
-    if phase is not None:
-        p = pp_single(phase, target_size)
-    else:
-        p = h.copy()
-
-    amp = find_channel(channels, "amplitude")
-    if amp is not None:
-        a = pp_single(amp, target_size)
-    else:
-        a = h.copy()
-
-    image = np.stack([h, p, a], axis=0).astype(np.float32)
-    return image, meta
+    measured_fov = fov_nm if fov_nm is not None else meta.get("scan_size_nm")
+    image, height_fft = prepare_afm_channels(channels, float(measured_fov or 0), crop_fov_nm)
+    meta["scan_size_nm"] = float(measured_fov)
+    meta["cnn_crop_fov_nm"] = crop_fov_nm
+    return image, height_fft, meta
 
 
 def collect_input_files(args) -> list[tuple[str, str]]:
@@ -207,6 +189,7 @@ def collect_input_files(args) -> list[tuple[str, str]]:
 
 def load_cnn_model(model_path: str, device) -> tuple:
     """加载 CNN 模型并返回 (model, add_fft_channel, n_channels, meta)."""
+    import torch
     ckpt = load_model_checkpoint(model_path, map_location=device)
     meta = ckpt if isinstance(ckpt, dict) else {}
 
@@ -241,7 +224,7 @@ def run_cnn_inference(
     """
     import torch
 
-    img_t = torch.from_numpy(image).unsqueeze(0).float().to(device)  # (1, 3, 128, 128)
+    img_t = torch.from_numpy(image).unsqueeze(0).float().to(device)
     if add_fft:
         img_t = compute_fft_channel(img_t)
 
@@ -254,26 +237,15 @@ def run_fft_inference(height_ch: np.ndarray, fov_nm: float) -> float:
 
     将图像插值到约 512×512（FFT 方法的工作分辨率）。
     """
-    import torch
-    import torch.nn.functional as F
-
     h, w = height_ch.shape
-    if h < 256 or w < 256:
-        # 太小则插值到 512
-        t = torch.from_numpy(height_ch).unsqueeze(0).unsqueeze(0).float()
-        t = F.interpolate(t, size=(512, 512), mode="bilinear", align_corners=False)
-        img_512 = t.squeeze().numpy()
-        n_px = 512
-    else:
-        img_512 = height_ch.astype(np.float64)
-        n_px = h
+    if h != w or h < 256:
+        raise ValueError("FFT requires an original square scan of at least 256 pixels")
+    img_512 = height_ch.astype(np.float64)
 
     # 归一化
     img_512 = (img_512 - img_512.min()) / (img_512.max() - img_512.min() + 1e-9)
 
-    ppp_est = pixels_per_moire_period(n_px, 2.0, fov_nm)  # 以 2° 为猜测
-    angle = extract_angle_fft_robust(img_512, fov_nm=fov_nm, actual_ppp=max(4.0, ppp_est))
-    return angle
+    return extract_angle_fft_blind(img_512, fov_nm=fov_nm)
 
 
 # ── 融合 ──────────────────────────────────────────────────────
@@ -292,16 +264,8 @@ def fusion_estimate(cnn_angle: float, fft_angle: float, cnn_unc: float,
     fused : float  融合角度
     w_cnn : float  CNN 权重
     """
-    w_cnn = cnn_unc / (cnn_unc + tau)
-    w_fft = 1.0 - 0.5 * w_cnn  # FFT 权重更高
-    w_cnn = 1.0 - w_fft
-
-    if np.isnan(fft_angle):
-        fused = cnn_angle
-        w_cnn = 1.0
-    else:
-        fused = w_cnn * cnn_angle + w_fft * fft_angle
-    return fused, w_cnn
+    fused, w_fft = fuse_angles(fft_angle, cnn_angle, cnn_unc, tau)
+    return fused, 1.0 - w_fft
 
 
 # ── 可视化 ────────────────────────────────────────────────────
@@ -358,6 +322,10 @@ def save_preview(image: np.ndarray, cnn_angle: float, cnn_unc: float,
 
 def main():
     args = parse_args()
+    from angle_cnn.core.seed import set_global_seed
+    set_global_seed(args.seed, deterministic_torch=True)
+    if args.mc_samples < 2:
+        raise ValueError("--mc-samples must be at least 2 for uncertainty-weighted fusion")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     import torch
@@ -380,10 +348,16 @@ def main():
 
     # 收集输入文件
     input_files = collect_input_files(args)
+    if not input_files:
+        raise ValueError("未找到可处理的输入文件")
     print(f"找到 {len(input_files)} 个输入文件")
 
     # 加载 CNN 模型
     model, add_fft, n_channels, ckpt_meta = load_cnn_model(model_path, device)
+    crop_fov_nm = float(ckpt_meta.get("train_crop_fov_nm") or TRAIN_CROP_FOV_NM)
+    base_channels = int(ckpt_meta.get("base_n_channels", n_channels - int(add_fft)))
+    if base_channels not in (1, 2, 3):
+        raise ValueError(f"不支持的基础通道数: {base_channels}")
     if add_fft:
         print(f"  CNN 使用 FFT 额外通道")
     print(f"  CNN 架构: {ckpt_meta.get('arch', 'resnet18')}, 输入通道: {n_channels}")
@@ -396,36 +370,28 @@ def main():
             # 加载
             if args.raw or filepath.endswith(".npz"):
                 if filepath.endswith(".npz"):
-                    image, meta = load_preprocessed_npz(filepath)
+                    image, height_fft, meta = load_preprocessed_npz(filepath)
+                    if args.fov_nm is not None and not np.isclose(args.fov_nm, float(meta.get("scan_size_nm", 0))):
+                        raise ValueError("--fov-nm 与已预处理 NPZ 的视野不一致；请重新预处理原始图像")
+                    if not np.isclose(float(meta.get("cnn_crop_fov_nm", TRAIN_CROP_FOV_NM)), crop_fov_nm):
+                        raise ValueError("NPZ 的 CNN 裁剪视野与 checkpoint 不一致；请按模型训练视野重新预处理")
                 else:
-                    image, meta = load_raw_as_npz(filepath)
+                    image, height_fft, meta = load_raw_as_npz(filepath, args.fov_nm, crop_fov_nm)
             else:
-                image, meta = load_raw_as_npz(filepath)
+                image, height_fft, meta = load_raw_as_npz(filepath, args.fov_nm, crop_fov_nm)
 
             # CNN
             cnn_angle, cnn_unc, _ = run_cnn_inference(
-                model, image, add_fft, device, args.mc_samples,
+                model, image[:base_channels], add_fft, device, args.mc_samples,
             )
 
             # FFT on height channel
             fov_nm = args.fov_nm
             if fov_nm is None and "scan_size_nm" in meta:
                 fov_nm = float(meta["scan_size_nm"])
-            if fov_nm is None or fov_nm <= 0:
-                fov_nm = FIXED_FOV_NM
-                logging.info(f"  {stem}: 未指定 FOV，使用默认值 {fov_nm:.0f} nm")
-
-            # height 通道目前是归一化的 [0,1]，需要反归一化或直接用插值
-            height_ch = image[0]  # (128, 128)
-            if height_ch.shape[0] < 256:
-                import torch.nn.functional as F
-                t = torch.from_numpy(height_ch).unsqueeze(0).unsqueeze(0).float()
-                t = F.interpolate(t, size=(512, 512), mode="bilinear", align_corners=False)
-                height_512 = t.squeeze().numpy()
-            else:
-                height_512 = height_ch
-
-            fft_angle = run_fft_inference(height_ch, fov_nm)
+            if fov_nm is None or not np.isfinite(fov_nm) or fov_nm <= 0:
+                raise ValueError("缺少实测 scan_size_nm；请提供 --fov-nm")
+            fft_angle = run_fft_inference(height_fft, fov_nm)
 
             # 融合
             fused, w_cnn = fusion_estimate(cnn_angle, fft_angle, cnn_unc, tau=args.tau)
@@ -488,8 +454,8 @@ def main():
     print(f"下一步：分析真实数据结果并对比模拟数据基线")
     print(f"{'='*50}")
 
+    return 0 if len(valid) == len(results) else 1
+
 
 if __name__ == "__main__":
-    # torch import inside main for clean help text
-    import torch  # noqa: F811
-    main()
+    raise SystemExit(main())

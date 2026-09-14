@@ -271,6 +271,8 @@ def evaluate(model, loader, criterion, device, use_amp=False,
 
 def main():
     args = parse_args()
+    if args.eval_only or args.resume:
+        raise ValueError("train_cnn_v2 does not implement --eval-only or --resume; use train_cnn.py")
     logging.basicConfig(level=logging.INFO)
     set_global_seed(args.seed)
 

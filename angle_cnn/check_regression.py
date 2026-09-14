@@ -40,6 +40,7 @@ from angle_cnn.core.config import THETA_MAX, THETA_MIN
 from angle_cnn.core.eval_utils import load_model_from_checkpoint
 from angle_cnn.core.io_utils import load_npz_dataset
 from angle_cnn.core.metrics import compute_stratified_metrics
+from angle_cnn.core.cnn import compute_fft_channel
 
 DATA_DIR = os.path.join(SCRIPT_DIR, "..", "data")
 OUT_DIR = os.path.join(SCRIPT_DIR, "outputs")
@@ -48,7 +49,7 @@ MODEL_PATH = os.path.join(OUT_DIR, "best_model.pt")
 BASELINE_PATH = os.path.join(OUT_DIR, "regression_baseline.json")
 
 
-def evaluate_model(model, images, labels, device, batch_size=128):
+def evaluate_model(model, images, labels, device, batch_size=128, add_fft_channel=False):
     """Evaluate model on test set, return (predictions_deg, labels_deg)."""
     import torch
 
@@ -64,6 +65,8 @@ def evaluate_model(model, images, labels, device, batch_size=128):
             x = torch.from_numpy(batch_imgs).unsqueeze(1).float().to(device)
         else:
             x = torch.from_numpy(batch_imgs).float().to(device)
+        if add_fft_channel:
+            x = compute_fft_channel(x)
 
         with torch.no_grad():
             preds_norm = model(x).squeeze(1).clamp(0, 1).cpu().numpy()
@@ -106,7 +109,8 @@ def main():
     print(f"设备: {device}\n")
 
     # 评估
-    preds, labels = evaluate_model(model, images_test, labels_test, device)
+    preds, labels = evaluate_model(model, images_test, labels_test, device,
+                                   add_fft_channel=bool(meta.get("add_fft_channel", False)))
     metrics = compute_stratified_metrics(preds, labels)
 
     current = {

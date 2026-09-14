@@ -13,8 +13,8 @@ eval_compare.py — MoS₂ moiré FFT vs CNN 角度提取公平对比评估（v3
 2) ``paired``（更公平）
   - 对每个测试角，用与数据集 **相同** 的 ``generate_sample`` 退化管线在 512 上生成同一场景，
     CNN 取 **中心裁剪** 128，FFT 用该场景的 **height 全幅 512**。
-  - 说明：仍用真值 θ 计算 ``ppp = n·L/fov``（与 ``extract_angle_fft`` 定义一致）；若需完全无标签先验，应再实现
-    “由图像自估计周期/网格”的 FFT 设置（可作为后续工作）。
+  - paired FFT 只用图像、实测 FOV 和预定角度范围定位六重对称峰，不使用测试标签设定搜索环。
+  - legacy FFT 保留按真值 θ 设置周期窗口的历史口径，仅供诊断和旧结果对照。
 
 融合（可选，需 ``--mc-samples > 0`` 以得到 σ_cnn）::
 
@@ -45,18 +45,18 @@ import torch
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 from angle_cnn.core.eval_fft import (
-    extract_angle_fft_robust,
+    extract_angle_fft_blind,
     fft_predict_batch_512,
-    generate_fft_image_512,
 )
 from angle_cnn.core.fonts import setup_matplotlib_cjk_font
 from angle_cnn.core.io_utils import (
     load_model_checkpoint,
     load_npz_dataset,
+    read_dataset_config,
     require_file,
     state_dict_from_checkpoint,
 )
-from dataset_generator import (
+from angle_cnn.dataset_generator import (
     _subseed,
     generate_sample_paired_cnn_fft,
 )
@@ -68,6 +68,7 @@ from angle_cnn.core.cnn import (
     detect_n_channels,
     predict_with_uncertainty,
 )
+from angle_cnn.core.fusion import fuse_angles
 from angle_cnn.core.metrics import (
     compute_calibration_metrics,
     compute_stratified_metrics,
@@ -95,13 +96,8 @@ def fusion_predict(
     unc_scale: float = 0.5,
 ) -> np.ndarray:
     """θ_final = w·θ_fft + (1-w)·θ_cnn，CNN 不确定度越大 w 越大（更偏向 FFT）。"""
-    w = cnn_stds / (cnn_stds + unc_scale + 1e-9)
-    w = np.clip(w, 0.0, 1.0)
-    return np.where(
-        np.isnan(fft_preds),
-        cnn_preds,
-        w * fft_preds + (1.0 - w) * cnn_preds,
-    ).astype(np.float32)
+    fused, _ = fuse_angles(fft_preds, cnn_preds, cnn_stds, unc_scale)
+    return np.asarray(fused, dtype=np.float32)
 
 
 def sweep_fusion_tau(
@@ -359,6 +355,8 @@ def _residual_correlation(
         return float("nan")
     fft_resid = labels[mask] - fft_preds[mask]
     cnn_resid = labels[mask] - cnn_preds[mask]
+    if np.std(fft_resid) == 0 or np.std(cnn_resid) == 0:
+        return float("nan")
     return float(np.corrcoef(fft_resid, cnn_resid)[0, 1])
 
 
@@ -374,6 +372,7 @@ def save_report(
     eval_mode: str = "legacy",
     fusion_preds: np.ndarray | None = None,
     fusion_unc_scale: float = 0.5,
+    fft128_preds: np.ndarray | None = None,
 ):
     path = os.path.join(OUT_DIR, "compare_report.txt")
     fft_metrics = compute_stratified_metrics(fft_preds, labels, theta_min=THETA_MIN, theta_max=THETA_MAX)
@@ -395,11 +394,17 @@ def save_report(
         f.write("对比方法：\n")
         if eval_mode == "paired":
             f.write("  CNN：与训练相同的退化管线，同一场景 128×128 中心裁剪\n")
-            f.write("  FFT：同一场景 height 通道 512×512（训练分布内退化）\n")
+            f.write("  FFT512：同一场景 height 全图；FFT128：与 CNN 同视野 height 中心裁剪（均无真值先验）\n")
         else:
             f.write("  CNN：数据集中 128×128 图像（与训练一致）\n")
             f.write("  FFT：按标签单独重算 512×512 高度图（训练分布内退化）\n")
         f.write("退化条件：高斯噪声 + 仿射畸变 + 高斯模糊 + 探针卷积 + 1/f噪声 + …\n\n")
+        if fft128_preds is not None:
+            valid128 = np.isfinite(fft128_preds)
+            f.write(f"同视野 FFT128 有效数: {valid128.sum()}/{len(valid128)}；")
+            f.write(f"失败率: {(~valid128).mean() * 100:.1f}%；")
+            f.write((f"有效样本 MAE: {np.abs(fft128_preds[valid128] - labels[valid128]).mean():.4f}°\n\n"
+                     if valid128.any() else "有效样本 MAE: 不可用\n\n"))
 
         f.write(f'{"指标":<20} {"FFT":>12} {"CNN":>12}\n')
         f.write("-" * 46 + "\n")
@@ -469,11 +474,22 @@ def save_report(
     csv_path = os.path.join(OUT_DIR, "compare_summary.csv")
     row = {
         "eval_mode": eval_mode,
+        "fft_period_prior": "none" if eval_mode == "paired" else "ground_truth_angle",
         "n_samples": int(len(labels)),
         "fft_valid": int(fft_valid.sum()),
+        "cnn_valid": int(np.isfinite(cnn_preds).sum()),
         "fft_fail_rate_pct": float((~fft_valid).sum() / len(labels) * 100),
+        "cnn_fail_rate_pct": float((~np.isfinite(cnn_preds)).sum() / len(labels) * 100),
         "fft_mae_deg": float(fft_errors.mean()),
         "cnn_mae_deg": float(cnn_errors.mean()),
+        "fft_median_deg": float(np.median(fft_errors)),
+        "cnn_median_deg": float(np.median(cnn_errors)),
+        "fft_std_deg": float(np.std(fft_errors)),
+        "cnn_std_deg": float(np.std(cnn_errors)),
+        "fft_p90_deg": float(np.percentile(fft_errors, 90)),
+        "cnn_p90_deg": float(np.percentile(cnn_errors, 90)),
+        "fft_max_error_deg": float(np.max(fft_errors)),
+        "cnn_max_error_deg": float(np.max(cnn_errors)),
         "mae_ratio_fft_over_cnn": float(fft_errors.mean() / cnn_errors.mean()),
         "fft_p95_deg": float(fft_metrics.percentile_errors.get(95, np.nan)),
         "cnn_p95_deg": float(cnn_metrics.percentile_errors.get(95, np.nan)),
@@ -486,6 +502,12 @@ def save_report(
         "residual_correlation": resid_corr if np.isfinite(resid_corr) else float("nan"),
         "fusion_unc_scale": float(fusion_unc_scale),
     }
+    if fft128_preds is not None:
+        valid128 = np.isfinite(fft128_preds)
+        row["fft128_valid"] = int(valid128.sum())
+        row["fft128_fail_rate_pct"] = float((~valid128).mean() * 100)
+        row["fft128_mae_deg"] = (float(np.mean(np.abs(fft128_preds[valid128] - labels[valid128])))
+                                 if valid128.any() else float("nan"))
     if fusion_preds is not None and fusion_metrics is not None:
         fusion_err = np.abs(fusion_preds - labels)
         row.update({
@@ -495,6 +517,7 @@ def save_report(
         })
     if cal is not None:
         row.update({
+            "cnn_mean_unc_deg": float(np.mean(cnn_stds)),
             "cnn_within_1sigma_pct": float(cal["within_1sigma_pct"]),
             "cnn_within_2sigma_pct": float(cal["within_2sigma_pct"]),
             "cnn_within_3sigma_pct": float(cal["within_3sigma_pct"]),
@@ -509,7 +532,7 @@ def save_report(
     print(f"  已保存: {csv_path}")
 
 
-if __name__ == "__main__":
+def main():
     import argparse
 
     parser = argparse.ArgumentParser()
@@ -517,7 +540,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--eval-mode",
         choices=("legacy", "paired"),
-        default="legacy",
+        default="paired",
         help="legacy：CNN 用 .npz 图像、FFT 单独重算；paired：同一场景中心裁 CNN + 整幅 FFT",
     )
     parser.add_argument("--paired-seed", type=int, default=12345, help="paired 模式下每样本子种子基准")
@@ -528,8 +551,11 @@ if __name__ == "__main__":
         help="融合权重 τ：w=σ/(σ+τ)，σ 为 CNN MC 标准差（度）",
     )
     parser.add_argument("--save-predictions", action="store_true",
-                        help="保存预测数组到 outputs/compare_predictions.npz（供 generate_thesis_figures.py 使用）")
+                        help="保存预测数组到 outputs/<eval-mode>/compare_predictions.npz")
     cli_args = parser.parse_args()
+    global OUT_DIR
+    OUT_DIR = os.path.join(SCRIPT_DIR, "outputs", cli_args.eval_mode)
+    os.makedirs(OUT_DIR, exist_ok=True)
 
     print("=" * 60)
     print("MoS₂ moiré：FFT(512px) vs CNN(128px) 公平对比评估（v3）")
@@ -537,6 +563,11 @@ if __name__ == "__main__":
 
     print(f"\n加载数据集: {DATASET_PATH}")
     data = load_npz_dataset(DATASET_PATH)
+    dataset_config = read_dataset_config(data)
+    if dataset_config and (dataset_config.get("img_size") != 128 or
+                           not np.isclose(dataset_config.get("theta_min", THETA_MIN), THETA_MIN) or
+                           not np.isclose(dataset_config.get("theta_max", THETA_MAX), THETA_MAX)):
+        raise ValueError("dataset image size or angle range differs from the fixed evaluation contract")
     images_test = data["images_test"]
     labels_test = data["labels_test"]
     n_ch = detect_n_channels(images_test)
@@ -550,39 +581,58 @@ if __name__ == "__main__":
     ckpt_n_ch = ckpt.get("n_channels", 1) if isinstance(ckpt, dict) else 1
     ckpt_dropout = ckpt.get("dropout", 0.3) if isinstance(ckpt, dict) else 0.3
     add_fft = ckpt.get("add_fft_channel", False) if isinstance(ckpt, dict) else False
-    model = build_model(n_channels=ckpt_n_ch, dropout=ckpt_dropout).to(device)
+    model = build_model(n_channels=ckpt_n_ch, dropout=ckpt_dropout,
+                        arch=ckpt.get("arch", "resnet18") if isinstance(ckpt, dict) else "resnet18").to(device)
     model.load_state_dict(state_dict_from_checkpoint(ckpt))
     if add_fft:
         print(f"  模型含 FFT 通道（n_channels={ckpt_n_ch}）")
 
-    if ckpt_n_ch != n_ch and cli_args.eval_mode == "legacy":
-        print(f"  警告：checkpoint 期望 {ckpt_n_ch} 通道，数据集为 {n_ch}，请检查模型与数据是否匹配。")
+    base_n_ch = int(ckpt.get("base_n_channels", ckpt_n_ch - int(add_fft))) if isinstance(ckpt, dict) else ckpt_n_ch
+    if base_n_ch != n_ch:
+        raise ValueError(f"checkpoint expects {base_n_ch} base channels, dataset has {n_ch}")
 
     fft_preds: np.ndarray
+    fft128_preds: np.ndarray | None = None
     cnn_input: np.ndarray
 
     if cli_args.eval_mode == "paired":
+        expected_crop_fov = FIXED_FOV_NM * 128 / 512
+        dataset_crop_fov = (float(dataset_config["crop_fov_nm"])
+                            if dataset_config and "crop_fov_nm" in dataset_config else None)
+        ckpt_crop_fov = (ckpt.get("train_crop_fov_nm") if isinstance(ckpt, dict) else None)
+        if dataset_crop_fov is not None and ckpt_crop_fov is not None and not np.isclose(dataset_crop_fov, ckpt_crop_fov):
+            raise ValueError("dataset crop FOV disagrees with checkpoint training crop FOV")
+        actual_crop_fov = dataset_crop_fov if dataset_crop_fov is not None else ckpt_crop_fov
+        if actual_crop_fov is None:
+            raise ValueError("paired evaluation requires a format-v2 dataset or checkpoint with train_crop_fov_nm")
+        if not np.isclose(actual_crop_fov, expected_crop_fov):
+            raise ValueError("paired 512/128 evaluation does not match the checkpoint's training crop FOV")
         print("\n[paired] 生成同场景配对样本（较慢）并 FFT 提角…")
         paired_list: list[np.ndarray] = []
         fft_list: list[float] = []
+        fft128_list: list[float] = []
         for i in range(len(labels_test)):
             theta_deg = float(labels_test[i])
             rng = np.random.default_rng(_subseed(cli_args.paired_seed, i))
-            img_cnn, h512, fov_nm, actual_ppp = generate_sample_paired_cnn_fft(
+            img_cnn, h512, fov_nm, _actual_ppp = generate_sample_paired_cnn_fft(
                 theta_deg,
                 rng,
                 img_size=128,
                 fixed_fov_nm=FIXED_FOV_NM,
-                n_channels=ckpt_n_ch,
+                n_channels=base_n_ch,
                 tip_radius_range=DEFAULT_TIP_RADIUS_RANGE,
                 n_sim=512,
             )
             paired_list.append(img_cnn)
-            fft_list.append(extract_angle_fft_robust(h512, fov_nm=fov_nm, actual_ppp=actual_ppp))
+            fft_list.append(extract_angle_fft_blind(h512, fov_nm=fov_nm))
+            center = (h512.shape[0] - 128) // 2
+            h128 = h512[center:center + 128, center:center + 128]
+            fft128_list.append(extract_angle_fft_blind(h128, fov_nm=fov_nm * 128 / h512.shape[0]))
             if (i + 1) % 500 == 0:
                 print(f"  paired 进度: {i + 1}/{len(labels_test)}")
         cnn_input = np.stack(paired_list, axis=0)
         fft_preds = np.array(fft_list, dtype=np.float32)
+        fft128_preds = np.array(fft128_list, dtype=np.float32)
     else:
         cnn_input = images_test
         print("\n[2] FFT 提取（512×512 重新生成，legacy 口径）...")
@@ -608,6 +658,10 @@ if __name__ == "__main__":
     if cli_args.eval_mode == "paired":
         n_fail = np.isnan(fft_preds).sum()
         print(f"\n  paired FFT 失败 {n_fail}/{len(fft_preds)} 张")
+        valid128 = np.isfinite(fft128_preds)
+        print(f"  同视野 FFT128: 有效 {valid128.sum()}/{len(valid128)}",
+              f"MAE={np.abs(fft128_preds[valid128] - labels_test[valid128]).mean():.4f}°"
+              if valid128.any() else "MAE=不可用")
 
     fusion_preds = None
     if cnn_stds is not None:
@@ -628,6 +682,10 @@ if __name__ == "__main__":
         print(f"  扫描范围: [{sweep_data['taus'][0]:.4f}, {sweep_data['taus'][-1]:.4f}]° "
               f"共 {len(sweep_data['taus'])} 点")
         plot_tau_sweep(sweep_data)
+        with open(os.path.join(OUT_DIR, "tau_sweep.csv"), "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["tau", "fusion_mae", "fusion_p95"])
+            writer.writerows(zip(sweep_data["taus"], sweep_data["maes"], sweep_data["p95s"]))
 
     print("\n[3] 误差统计:")
     fft_errors, fft_valid = error_stats(fft_preds, labels_test, "FFT")
@@ -644,6 +702,7 @@ if __name__ == "__main__":
         eval_mode=cli_args.eval_mode,
         fusion_preds=fusion_preds,
         fusion_unc_scale=cli_args.fusion_unc_scale,
+        fft128_preds=fft128_preds,
     )
 
     print("\n" + "=" * 60)
@@ -666,8 +725,13 @@ if __name__ == "__main__":
             cnn_stds=cnn_stds if cnn_stds is not None else np.array([]),
             fusion_preds=fusion_preds if fusion_preds is not None else np.array([]),
             eval_mode=cli_args.eval_mode,
+            fft128_preds=fft128_preds if fft128_preds is not None else np.array([]),
         )
         print(f"  预测已保存: {pred_save_path}")
 
     print("=" * 60)
     print("\n下一步：python distortion_sweep.py")
+
+
+if __name__ == "__main__":
+    main()

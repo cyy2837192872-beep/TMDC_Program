@@ -47,8 +47,10 @@ from angle_cnn.core.io_utils import require_file
 from angle_cnn.core.config import IMG_SIZE, THETA_MIN, THETA_MAX
 from angle_cnn.core.physics import A_NM, angle_uncertainty, FIXED_FOV_NM, pixels_per_moire_period
 from angle_cnn.core.moire_sim import synthesize_multichannel_moire, synthesize_reconstructed_moire
-from moire_pipeline import extract_angle_fft
-from angle_cnn.core.cnn import predict_with_uncertainty
+from angle_cnn.core.eval_fft import extract_angle_fft_blind
+from angle_cnn.core.seed import set_global_seed
+from angle_cnn.dataset_generator import _subseed
+from angle_cnn.core.cnn import predict_with_uncertainty, compute_fft_channel
 from angle_cnn.core.eval_utils import load_model_from_checkpoint, cnn_predict_single
 
 setup_matplotlib_cjk_font()
@@ -196,7 +198,7 @@ def run_graded_eval(model, device, n_channels=1, mc_samples=0, add_fft_channel=F
             fft_fail_count, fft128_fail_count = 0, 0
 
             for trial in range(N_TRIALS):
-                seed = hash(f"{level_name}_{theta}_{trial}") % (2 ** 31)
+                seed = _subseed(42, (current - 1) * N_TRIALS + trial)
                 rng = np.random.default_rng(seed)
 
                 (img_cnn, img_512, fov_nm, actual_ppp_512,
@@ -206,15 +208,15 @@ def run_graded_eval(model, device, n_channels=1, mc_samples=0, add_fft_channel=F
                 )
 
                 # FFT-512
-                th_fft, _, _ = extract_angle_fft(img_512, fov_nm, ppp=actual_ppp_512)
-                if th_fft is not None:
+                th_fft = extract_angle_fft_blind(img_512, fov_nm)
+                if np.isfinite(th_fft):
                     fft_errors.append(abs(th_fft - theta))
                 else:
                     fft_fail_count += 1
 
                 # FFT-128
-                th_fft128, _, _ = extract_angle_fft(img_128, fov_128, ppp=actual_ppp_128)
-                if th_fft128 is not None:
+                th_fft128 = extract_angle_fft_blind(img_128, fov_128)
+                if np.isfinite(th_fft128):
                     fft128_errors.append(abs(th_fft128 - theta))
                 else:
                     fft128_fail_count += 1
@@ -382,6 +384,7 @@ def save_csv(summary):
             "级别", "噪声", "模糊(px)", "剪切(shear_y)", "探针半径(nm)",
             "FFT512_MAE(°)", "FFT512失败率(%)", "FFT128_MAE(°)", "FFT128失败率(%)",
             "CNN_MAE(°)", "CNN_unc(°)", "提升倍数(FFT512/CNN)", "提升倍数(FFT128/CNN)",
+            "fft_period_prior", "seed",
         ])
         for s in summary:
             imp128_v = s["fft128_mae"] / s["cnn_mae"] if (not np.isnan(s["fft128_mae"]) and s["cnn_mae"] > 1e-6) else np.nan
@@ -396,6 +399,7 @@ def save_csv(summary):
                 f"{s['cnn_unc']:.4f}" if s["cnn_unc"] > 0 else "N/A",
                 f"{s['improvement']:.1f}" if np.isfinite(s["improvement"]) else "N/A",
                 f"{imp128_v:.1f}" if np.isfinite(imp128_v) else "N/A",
+                "none", 42,
             ])
     print(f"已保存: {path}")
 
@@ -412,6 +416,7 @@ def save_report(summary):
         f.write(f"探针：TITAN 70（tip_radius = 7 nm）\n")
         f.write(f"测试角度：{TEST_THETAS}\n")
         f.write(f"每配置测试次数：{N_TRIALS}\n")
+        f.write("FFT period prior: none; seed: 42 (stable per-sample subseeds)\n")
         f.write(f"FFT理论不确定度（无畸变）：{unc_theory:.4f}°\n\n")
 
         f.write("-" * 90 + "\n")
@@ -460,6 +465,7 @@ def save_report(summary):
 
 
 def main():
+    set_global_seed(42)
     parser = argparse.ArgumentParser()
     parser.add_argument("--mc-samples", type=int, default=0, help="MC Dropout 采样次数 (0=禁用)")
     args = parser.parse_args()

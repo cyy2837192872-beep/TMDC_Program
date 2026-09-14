@@ -126,6 +126,9 @@ python dataset_generator.py --samples 20000 --workers 8
 
 与 `core/config.py` 对齐的常用默认：**θ ∈ [0.5°, 5°]**，**CNN 裁剪 128**，推荐仿真 **512**（与 `eval_compare` 高分辨率 FFT 口径一致）。**若你曾在 2026-04 之前的代码版本上生成过 `.npz`，请用当前 `core/moire_sim.py`（固定 nm 视野）重新生成数据集后再训练**，以免与论文中「固定物理视野」表述不一致。
 
+新生成的 `fovs_train/val/test` 表示**存入 NPZ 的 CNN 裁剪图**的物理视野；根目录 `config` 是可在 `allow_pickle=False` 下读取的 JSON，含 `format_version=2`、全图视野、裁剪视野和主要生成参数。旧版数据集的 `fovs_*` 曾记录全图视野，不能直接用于裁剪图的定量 FFT 或尺度标定。若用 `--n-sim 256` 训练，128 像素裁剪约为 156.8 nm；配对评估的固定 512/128 协议会拒绝与该训练视野不一致的新数据。
+每张训练图使用由总 `seed` 和样本索引确定的子种子；相同参数下，`--workers 0` 与多进程生成的 NPZ 数组一致。
+
 ### 2. 训练 CNN（`train_cnn.py` v5）
 
 ```bash
@@ -148,6 +151,8 @@ python check_regression.py                    # 对比 baseline，exit 0 = 通�
 python check_regression.py --save-baseline    # 更新基准
 ```
 
+完整续训使用 `--resume outputs/last_training.pt`；`best_model.pt` 仅保存推理权重，旧权重微调使用 `--init-weights`。续训恢复原训练计划并校验数据 SHA-256。详见 [训练与真实数据验收流程](angle_cnn/docs/acceptance_runbook.md)。
+
 详见 `python train_cnn.py --help`。**实验向**：`train_cnn_v2.py` + `core/dual_stream.py`。
 
 **Checkpoint**：`best_model.pt` 除 `model_state_dict` 外可含 `arch`、`n_channels`、`add_fft_channel`、`dropout`、`huber_delta` 等；下游 `eval_compare.py` 只依赖权重与通道相关字段。
@@ -157,17 +162,17 @@ python check_regression.py --save-baseline    # 更新基准
 ### 3. FFT vs CNN 评估（两种口径 + 融合）
 
 ```bash
-# legacy：CNN 用 .npz 测试集图；FFT 按标签单独重算 512（与历史表格兼容）
-python eval_compare.py --mc-samples 30
+# legacy：CNN 用 .npz 测试集图；FFT 按标签单独重算 512，并用真值设置搜索窗口（仅历史对照）
+python eval_compare.py --eval-mode legacy --mc-samples 30
 
-# paired：同一随机退化场景 → CNN 中心 128 + 同场景 height@512（更公平）
+# paired（默认）：同一随机退化场景 → CNN 中心 128 + 同场景 height@512；FFT 不使用真值周期
 python eval_compare.py --eval-mode paired --paired-seed 12345 --mc-samples 30 --fusion-unc-scale 0.5
 ```
 
 - **`--mc-samples 0`**：不做 MC Dropout，**不输出融合**（融合需要 σ_cnn）。  
 - **融合**：\( \theta = w\,\theta_{\mathrm{fft}} + (1-w)\,\theta_{\mathrm{cnn}} \)，\(w = \sigma/(\sigma+\tau)\)，`τ` = `--fusion-unc-scale`（度）。
 
-默认输出目录：`angle_cnn/outputs/`（`compare_report.txt`、`compare_scatter.png`、`compare_error.png`、`compare_summary.csv` 等）。
+评估输出按模式分别写入 `angle_cnn/outputs/paired/` 和 `angle_cnn/outputs/legacy/`（报告、图、摘要、`tau_sweep.csv`）。两种模式都需要运行，论文生成器才会生成对比表。paired 使用盲 FFT：只给定图像、实测 FOV 和预先固定的 0.5°–5° 范围，要求六个峰构成同一六重对称环；另记录与 CNN 同中心视野的 FFT128 有效数、失败率和 MAE。legacy 仍用测试标签限定搜索，仅用于历史诊断。两种模式的场景与先验不同，不应把差值归因于配对本身。τ 扫描只用于敏感性分析，正式融合参数应从独立验证集选择。
 
 ### 4. 合并论文用指标表
 
@@ -177,11 +182,14 @@ python export_thesis_table.py
 # → outputs/thesis_table_metrics.csv
 ```
 
-依赖：先运行 `train_cnn.py`（生成 `train_test_summary.csv`）与 `eval_compare.py`（生成 `compare_summary.csv`）。
+依赖：先运行 `train_cnn.py`（生成 `train_test_summary.csv`）与 `eval_compare.py --eval-mode paired`（生成 `paired/compare_summary.csv`）。完整论文表格还需 `legacy` 评估和鲁棒性结果；缺少实测数据时脚本会报错，不会生成填充数字。
 
 ### 5. 真实 AFM 数据推理（sim-to-real）
 
 ```bash
+# 先用实测扫描视野预处理；输出保留原分辨率 height_fft
+python preprocess_afm_data.py --input path/to/scan.tif --output data/afm_processed/ --fov-nm 300
+
 # 预处理后的 .npz 文件
 python inference_real_data.py --input-dir data/afm_processed/ --output real_results/
 
@@ -192,14 +200,17 @@ python inference_real_data.py --input-dir data/afm_raw/ --output real_results/ -
 python inference_real_data.py --input sample.npz --output real_results/
 ```
 
-同时运行 CNN（MC Dropout 不确定性）+ FFT + 融合（默认 τ=0.01°），输出 CSV 结果和每样本三栏预览图。
+`--seed` 控制 MC Dropout 随机状态；任何样本处理失败时进程返回非零，CSV 保留错误行。IBW 预处理与原始推理共用通道和扫描视野读取器。
+
+同时运行 CNN（MC Dropout 不确定性）+ 盲 FFT + 融合（默认 τ=0.5°），输出 CSV 结果和每样本三栏预览图。必须提供可信的正方形扫描视野（nm）；CNN 按 checkpoint 记录的训练裁剪视野截取中心图（默认约 78.4 nm），FFT 使用原始分辨率。预处理自定义模型数据时，需传入与 checkpoint 一致的 `--crop-fov-nm`。低于训练像素分辨率或旧版不含 `height_fft` 的 NPZ 会报错。只有 height 通道时，缺失的 phase/amplitude 仍以 height 复制；结果须经真实标注样本验证，不能直接当实验精度。
 详细优化路线图：`angle_cnn/docs/sim_to_real_roadmap.md`。
 
 ### 6. 其它评测与工具
 
 ```bash
-python graded_eval.py --mc-samples 30
+python graded_eval.py --mc-samples 30  # 盲 FFT，固定稳定种子
 python distortion_sweep.py
+python robustness_sweep.py --trials 10 --mc-samples 30  # CSV 同时记录 MAE、MedAE、失败率；FFT 无标签先验
 python analyze_fft_failure.py
 python preprocess_afm_data.py --input path/to/scan --output ../data/afm_processed/
 ```

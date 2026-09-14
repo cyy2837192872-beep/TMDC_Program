@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
+from angle_cnn.core.afm_preprocess import TRAIN_CROP_FOV_NM
 
 
 @dataclass
@@ -47,6 +48,7 @@ class AFMMetadata:
     """AFM 图像元数据。"""
     filename: str
     scan_size_nm: float = 0.0
+    cnn_crop_fov_nm: float = TRAIN_CROP_FOV_NM
     resolution: Tuple[int, int] = (0, 0)
     scan_rate_hz: float = 0.0
     probe_type: str = ""
@@ -127,47 +129,22 @@ def load_spm_file(filepath: str) -> Tuple[Dict[str, np.ndarray], AFMMetadata]:
 
 def load_ibw_file(filepath: str) -> Tuple[Dict[str, np.ndarray], AFMMetadata]:
     """加载 Igor Binary Wave (.ibw) 文件。"""
-    metadata = AFMMetadata(filename=os.path.basename(filepath))
+    from angle_cnn.core.io_afm import load_cypher_image, find_channel
+    raw, note = load_cypher_image(filepath, return_metadata=True)
     channels = {}
-    
-    try:
-        import igor2.binarywave as ibw
-        
-        data = ibw.load(filepath)
-        
-        if 'wave' in data:
-            wave = data['wave']
-            if 'wData' in wave:
-                raw = wave['wData']
-                
-                # IBW 可能包含多通道数据
-                if raw.ndim == 3:
-                    # 假设形状为 (channels, height, width)
-                    channel_names = ['height', 'phase', 'amplitude']
-                    for i in range(min(raw.shape[0], len(channel_names))):
-                        channels[channel_names[i]] = raw[i].astype(np.float32)
-                elif raw.ndim == 2:
-                    channels['height'] = raw.astype(np.float32)
-            
-            # 提取元数据
-            if 'note' in wave:
-                note = wave['note']
-                if isinstance(note, dict):
-                    metadata.scan_size_nm = float(note.get('ScanSize', 0))
-                    metadata.scan_rate_hz = float(note.get('ScanRate', 0))
-                    metadata.probe_type = str(note.get('ProbeType', ''))
-        
-    except ImportError:
-        logging.warning(
-            f"无法解析 .ibw 文件: {filepath}\n"
-            "请安装 igor2: pip install igor2"
-        )
-        return None, metadata
-    
-    metadata.channels = list(channels.keys())
-    if channels:
-        metadata.resolution = list(channels.values())[0].shape
-    
+    for name in ("height", "phase", "amplitude"):
+        channel = find_channel(raw, name)
+        if channel is not None:
+            channels[name] = channel.astype(np.float32)
+    if "height" not in channels:
+        raise ValueError("IBW file has no identifiable height channel")
+    # Cypher ScanSize is in metres; an explicit scan_size_nm is already in nm.
+    fov = float(note["scan_size_nm"]) if "scan_size_nm" in note else float(note.get("ScanSize", 0)) * 1e9
+    metadata = AFMMetadata(
+        filename=os.path.basename(filepath), scan_size_nm=fov,
+        scan_rate_hz=float(note.get("ScanRate", 0)), probe_type=note.get("ProbeType", ""),
+        channels=list(channels), resolution=channels["height"].shape,
+    )
     return channels, metadata
 
 
@@ -187,16 +164,8 @@ def load_image_file(filepath: str) -> Tuple[Dict[str, np.ndarray], AFMMetadata]:
             # 灰度图像
             channels['height'] = arr
         elif arr.ndim == 3:
-            if arr.shape[2] == 3:
-                # RGB 图像，假设三个通道分别对应 height/phase/amplitude
-                channels['height'] = arr[:, :, 0]
-                channels['phase'] = arr[:, :, 1]
-                channels['amplitude'] = arr[:, :, 2]
-            elif arr.shape[2] == 4:
-                # RGBA，忽略 alpha 通道
-                channels['height'] = arr[:, :, 0]
-                channels['phase'] = arr[:, :, 1]
-                channels['amplitude'] = arr[:, :, 2]
+            # An RGB export is a rendered image, not three AFM measurements.
+            channels['height'] = np.asarray(img.convert('L'), dtype=np.float32)
         
     except ImportError:
         # 尝试使用 imageio 或 cv2
@@ -207,9 +176,7 @@ def load_image_file(filepath: str) -> Tuple[Dict[str, np.ndarray], AFMMetadata]:
             if arr.ndim == 2:
                 channels['height'] = arr
             elif arr.ndim == 3 and arr.shape[2] >= 3:
-                channels['height'] = arr[:, :, 0]
-                channels['phase'] = arr[:, :, 1]
-                channels['amplitude'] = arr[:, :, 2]
+                channels['height'] = arr[:, :, :3].mean(axis=2)
                 
         except ImportError:
             logging.warning(f"无法加载图像文件: {filepath}")
@@ -342,26 +309,10 @@ def preprocess_afm_dataset(
     meta_dict : dict
         元数据字典
     """
-    # 定义通道顺序（与训练数据一致）
-    channel_order = ['height', 'phase', 'amplitude']
-    
-    processed = []
-    for ch_name in channel_order:
-        if ch_name in channels:
-            img = preprocess_image(channels[ch_name], target_size)
-            processed.append(img)
-    
-    if not processed:
-        raise ValueError("没有有效的通道数据")
-    
-    # 如果只有一个通道，复制到三个通道（兼容多通道模型）
-    while len(processed) < 3:
-        processed.append(processed[0].copy())
-    
-    # 堆叠为多通道图像
-    image = np.stack(processed[:3], axis=0)  # (3, target_size, target_size)
-    
-    # 转换元数据为字典
+    if target_size != 128:
+        raise ValueError("current checkpoints require a 128-pixel CNN crop")
+    from angle_cnn.core.afm_preprocess import prepare_afm_channels
+    image, _ = prepare_afm_channels(channels, metadata.scan_size_nm, metadata.cnn_crop_fov_nm)
     meta_dict = asdict(metadata)
     
     return image, meta_dict
@@ -404,6 +355,8 @@ def process_single_file(
     output_dir: str,
     target_size: int = 128,
     preview: bool = False,
+    fov_nm: float | None = None,
+    crop_fov_nm: float = TRAIN_CROP_FOV_NM,
 ) -> Optional[str]:
     """处理单个 AFM 文件。
     
@@ -420,6 +373,9 @@ def process_single_file(
     if channels is None or len(channels) == 0:
         print(f"  警告：无法加载数据，跳过")
         return None
+    if fov_nm is not None:
+        metadata.scan_size_nm = fov_nm
+    metadata.cnn_crop_fov_nm = crop_fov_nm
     
     print(f"  加载成功：{len(channels)} 个通道，分辨率 {metadata.resolution}")
     print(f"  通道：{list(channels.keys())}")
@@ -437,6 +393,8 @@ def process_single_file(
     # 预处理
     try:
         image, meta_dict = preprocess_afm_dataset(channels, metadata, target_size)
+        from angle_cnn.core.afm_preprocess import prepare_afm_channels
+        _, height_fft = prepare_afm_channels(channels, metadata.scan_size_nm, metadata.cnn_crop_fov_nm)
         print(f"  预处理完成：形状 {image.shape}")
     except Exception as e:
         print(f"  预处理失败：{e}")
@@ -447,6 +405,7 @@ def process_single_file(
     np.savez_compressed(
         output_path,
         image=image,
+        height_fft=height_fft,
         metadata=json.dumps(meta_dict),
     )
     
@@ -465,6 +424,10 @@ def main():
     parser.add_argument("--input-dir", type=str, help="输入目录（批量处理）")
     parser.add_argument("--output", type=str, required=True, help="输出目录")
     parser.add_argument("--target-size", type=int, default=128, help="目标图像尺寸")
+    parser.add_argument("--fov-nm", type=float, default=None,
+                        help="实测正方形扫描视野边长（nm）；缺失时须由原始文件可靠提供")
+    parser.add_argument("--crop-fov-nm", type=float, default=TRAIN_CROP_FOV_NM,
+                        help="CNN 训练图像的物理裁剪视野（nm）；自定义模型须与 checkpoint 一致")
     parser.add_argument("--preview", action="store_true", help="生成预览图")
     parser.add_argument("--pattern", type=str, default="*", help="文件匹配模式")
     
@@ -498,7 +461,9 @@ def main():
             filepath, 
             args.output, 
             args.target_size,
-            args.preview
+            args.preview,
+            args.fov_nm,
+            args.crop_fov_nm,
         )
         if result:
             output_files.append(result)
