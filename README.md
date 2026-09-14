@@ -151,6 +151,8 @@ python check_regression.py                    # 对比 baseline，exit 0 = 通�
 python check_regression.py --save-baseline    # 更新基准
 ```
 
+完整续训使用 `--resume outputs/last_training.pt`；`best_model.pt` 仅保存推理权重，旧权重微调使用 `--init-weights`。续训恢复原训练计划并校验数据 SHA-256。详见 [训练与真实数据验收流程](angle_cnn/docs/acceptance_runbook.md)。
+
 详见 `python train_cnn.py --help`。**实验向**：`train_cnn_v2.py` + `core/dual_stream.py`。
 
 **Checkpoint**：`best_model.pt` 除 `model_state_dict` 外可含 `arch`、`n_channels`、`add_fft_channel`、`dropout`、`huber_delta` 等；下游 `eval_compare.py` 只依赖权重与通道相关字段。
@@ -198,13 +200,15 @@ python inference_real_data.py --input-dir data/afm_raw/ --output real_results/ -
 python inference_real_data.py --input sample.npz --output real_results/
 ```
 
+`--seed` 控制 MC Dropout 随机状态；任何样本处理失败时进程返回非零，CSV 保留错误行。IBW 预处理与原始推理共用通道和扫描视野读取器。
+
 同时运行 CNN（MC Dropout 不确定性）+ 盲 FFT + 融合（默认 τ=0.5°），输出 CSV 结果和每样本三栏预览图。必须提供可信的正方形扫描视野（nm）；CNN 按 checkpoint 记录的训练裁剪视野截取中心图（默认约 78.4 nm），FFT 使用原始分辨率。预处理自定义模型数据时，需传入与 checkpoint 一致的 `--crop-fov-nm`。低于训练像素分辨率或旧版不含 `height_fft` 的 NPZ 会报错。只有 height 通道时，缺失的 phase/amplitude 仍以 height 复制；结果须经真实标注样本验证，不能直接当实验精度。
 详细优化路线图：`angle_cnn/docs/sim_to_real_roadmap.md`。
 
 ### 6. 其它评测与工具
 
 ```bash
-python graded_eval.py --mc-samples 30
+python graded_eval.py --mc-samples 30  # 盲 FFT，固定稳定种子
 python distortion_sweep.py
 python robustness_sweep.py --trials 10 --mc-samples 30  # CSV 同时记录 MAE、MedAE、失败率；FFT 无标签先验
 python analyze_fft_failure.py

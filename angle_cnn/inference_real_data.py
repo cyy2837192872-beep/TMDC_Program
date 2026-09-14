@@ -128,30 +128,15 @@ def load_raw_as_npz(
 
     优先使用 core.io_afm 的 Cypher ES 解析器；回退到 PIL。
     """
-    from angle_cnn.core.io_afm import (
-        find_channel,
-        load_cypher_image,
-    )
-    from angle_cnn.preprocess_afm_data import (
-        load_ibw_file,
-        load_image_file,
-        load_spm_file,
-    )
+    from angle_cnn.core.io_afm import find_channel
+    from angle_cnn.preprocess_afm_data import load_ibw_file, load_image_file, load_spm_file
 
     ext = Path(filepath).suffix.lower()
     channels = {}
     meta = {}
-
     if ext == ".ibw":
-        try:
-            result = load_cypher_image(filepath, return_metadata=True)
-            if isinstance(result, tuple):
-                channels, meta = result
-            else:
-                channels = result
-        except Exception:
-            channels, metadata = load_ibw_file(filepath)
-            meta = vars(metadata)
+        channels, metadata = load_ibw_file(filepath)
+        meta = vars(metadata)
     elif ext == ".spm":
         channels, metadata = load_spm_file(filepath)
         meta = vars(metadata)
@@ -337,6 +322,8 @@ def save_preview(image: np.ndarray, cnn_angle: float, cnn_unc: float,
 
 def main():
     args = parse_args()
+    from angle_cnn.core.seed import set_global_seed
+    set_global_seed(args.seed, deterministic_torch=True)
     if args.mc_samples < 2:
         raise ValueError("--mc-samples must be at least 2 for uncertainty-weighted fusion")
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -361,6 +348,8 @@ def main():
 
     # 收集输入文件
     input_files = collect_input_files(args)
+    if not input_files:
+        raise ValueError("未找到可处理的输入文件")
     print(f"找到 {len(input_files)} 个输入文件")
 
     # 加载 CNN 模型
@@ -465,6 +454,8 @@ def main():
     print(f"下一步：分析真实数据结果并对比模拟数据基线")
     print(f"{'='*50}")
 
+    return 0 if len(valid) == len(results) else 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

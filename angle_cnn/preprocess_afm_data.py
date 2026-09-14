@@ -129,47 +129,22 @@ def load_spm_file(filepath: str) -> Tuple[Dict[str, np.ndarray], AFMMetadata]:
 
 def load_ibw_file(filepath: str) -> Tuple[Dict[str, np.ndarray], AFMMetadata]:
     """加载 Igor Binary Wave (.ibw) 文件。"""
-    metadata = AFMMetadata(filename=os.path.basename(filepath))
+    from angle_cnn.core.io_afm import load_cypher_image, find_channel
+    raw, note = load_cypher_image(filepath, return_metadata=True)
     channels = {}
-    
-    try:
-        import igor2.binarywave as ibw
-        
-        data = ibw.load(filepath)
-        
-        if 'wave' in data:
-            wave = data['wave']
-            if 'wData' in wave:
-                raw = wave['wData']
-                
-                # IBW 可能包含多通道数据
-                if raw.ndim == 3:
-                    # 假设形状为 (channels, height, width)
-                    channel_names = ['height', 'phase', 'amplitude']
-                    for i in range(min(raw.shape[0], len(channel_names))):
-                        channels[channel_names[i]] = raw[i].astype(np.float32)
-                elif raw.ndim == 2:
-                    channels['height'] = raw.astype(np.float32)
-            
-            # 提取元数据
-            if 'note' in wave:
-                note = wave['note']
-                if isinstance(note, dict):
-                    metadata.scan_size_nm = float(note.get('ScanSize', 0))
-                    metadata.scan_rate_hz = float(note.get('ScanRate', 0))
-                    metadata.probe_type = str(note.get('ProbeType', ''))
-        
-    except ImportError:
-        logging.warning(
-            f"无法解析 .ibw 文件: {filepath}\n"
-            "请安装 igor2: pip install igor2"
-        )
-        return None, metadata
-    
-    metadata.channels = list(channels.keys())
-    if channels:
-        metadata.resolution = list(channels.values())[0].shape
-    
+    for name in ("height", "phase", "amplitude"):
+        channel = find_channel(raw, name)
+        if channel is not None:
+            channels[name] = channel.astype(np.float32)
+    if "height" not in channels:
+        raise ValueError("IBW file has no identifiable height channel")
+    # Cypher ScanSize is in metres; an explicit scan_size_nm is already in nm.
+    fov = float(note["scan_size_nm"]) if "scan_size_nm" in note else float(note.get("ScanSize", 0)) * 1e9
+    metadata = AFMMetadata(
+        filename=os.path.basename(filepath), scan_size_nm=fov,
+        scan_rate_hz=float(note.get("ScanRate", 0)), probe_type=note.get("ProbeType", ""),
+        channels=list(channels), resolution=channels["height"].shape,
+    )
     return channels, metadata
 
 

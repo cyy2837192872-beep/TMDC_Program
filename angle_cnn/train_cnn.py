@@ -80,6 +80,7 @@ from angle_cnn.core.cnn import (
 )
 from angle_cnn.core.io_utils import load_model_checkpoint, load_npz_dataset, read_dataset_config, state_dict_from_checkpoint
 from angle_cnn.core.seed import set_global_seed, worker_init_fn
+from angle_cnn.core.training_state import capture_rng, restore_rng, atomic_save, dataset_digest
 from angle_cnn.core.augment import get_default_augmentation
 from angle_cnn.core.metrics import compute_stratified_metrics, generate_evaluation_report
 from angle_cnn.core.train_utils import ema_update, weighted_huber_loss
@@ -138,7 +139,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help="随机种子")
     parser.add_argument("--data-dir", type=str, default=None, help="数据集目录")
     parser.add_argument("--output-dir", type=str, default=None, help="输出目录")
-    parser.add_argument("--resume", type=str, default=None, help="从 checkpoint 恢复训练")
+    parser.add_argument("--resume", type=str, default=None, help="从 last_training.pt 恢复完整训练状态及原训练参数")
+    parser.add_argument("--init-weights", type=str, default=None, help="仅加载模型权重开始新训练")
+    parser.add_argument("--stop-after-epoch", type=int, default=None, help="在指定轮次保存完整状态后退出；总 epochs 计划不变")
     parser.add_argument("--no-augment", action="store_true", help="禁用数据增强")
     parser.add_argument("--mc-samples", type=int, default=DEFAULT_MC_SAMPLES,
                         help="MC Dropout 推理采样次数（0 禁用）")
@@ -277,8 +280,11 @@ def train_one_epoch(model, loader, optimizer, device,
                     grad_clip: float = 1.0, progress: bool = False, desc: str = "train",
                     huber_delta: float = 0.02, angle_loss_weight: float = 0.0,
                     ema_model=None, ema_decay: float = 0.0):
+    if len(loader) == 0:
+        raise ValueError("Training loader has no batches; reduce --batch-size or add training samples")
     model.train()
     total_loss = 0.0
+    processed = 0
     it = loader
     if progress and tqdm is not None:
         it = tqdm(loader, desc=desc, leave=False, file=sys.stderr, dynamic_ncols=True)
@@ -318,9 +324,10 @@ def train_one_epoch(model, loader, optimizer, device,
             ema_update(model, ema_model, ema_decay)
 
         total_loss += loss.item() * len(imgs)
+        processed += len(imgs)
         if progress and tqdm is not None and hasattr(it, "set_postfix"):
             it.set_postfix(loss=f"{loss.item():.4f}", refresh=False)
-    return total_loss / len(loader.dataset)
+    return total_loss / processed
 
 
 @torch.no_grad()
@@ -407,14 +414,30 @@ def save_log_plot(train_losses, val_losses, val_maes, log_png_path):
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO)
+    if sum(bool(x) for x in (args.resume, args.init_weights, args.eval_only)) > 1:
+        raise ValueError("--resume, --init-weights and --eval-only are mutually exclusive")
+    resume_state = None
+    if args.resume:
+        resume_state = load_model_checkpoint(args.resume, map_location="cpu")
+        if not isinstance(resume_state, dict) or resume_state.get("training_state_version") != 1:
+            raise ValueError("--resume requires last_training.pt; use --init-weights for a weights-only checkpoint")
+        # Restore the original schedule and hyperparameters. Location and stop point remain selectable.
+        for key, value in resume_state["args"].items():
+            if key not in {"resume", "init_weights", "eval_only", "data_dir", "output_dir", "stop_after_epoch"}:
+                setattr(args, key, value)
+    if args.epochs < 1 or args.batch_size < 1:
+        raise ValueError("--epochs and --batch-size must be positive")
+    if args.stop_after_epoch is not None and args.stop_after_epoch < 1:
+        raise ValueError("--stop-after-epoch must be positive")
     set_global_seed(args.seed)
 
-    data_dir = args.data_dir or os.path.join(SCRIPT_DIR, "..", "data")
-    out_dir = args.output_dir or os.path.join(SCRIPT_DIR, "outputs")
+    data_dir = args.data_dir or (os.path.dirname(resume_state["dataset_path"]) if resume_state else os.path.join(SCRIPT_DIR, "..", "data"))
+    out_dir = args.output_dir or (os.path.dirname(os.path.abspath(args.resume)) if args.resume else os.path.join(SCRIPT_DIR, "outputs"))
     os.makedirs(out_dir, exist_ok=True)
 
     dataset_path = os.path.join(data_dir, "moire_dataset.npz")
     model_path = os.path.join(out_dir, "best_model.pt")
+    training_path = os.path.join(out_dir, "last_training.pt")
     log_csv = os.path.join(out_dir, "train_log.csv")
     log_png = os.path.join(out_dir, "train_log.png")
 
@@ -452,6 +475,9 @@ def main():
     train_crop_fov_nm = (float(dataset_config["crop_fov_nm"])
                          if dataset_config and "crop_fov_nm" in dataset_config else None)
 
+    data_sha256 = dataset_digest(dataset_path) if not args.eval_only else None
+    if resume_state is not None and resume_state["data_sha256"] != data_sha256:
+        raise ValueError("Resume dataset differs from the original training dataset")
     base_n_ch = detect_n_channels(data["images_train"])
     preloaded_ckpt = None
     if args.eval_only:
@@ -557,7 +583,10 @@ def main():
 
     w_init = partial(worker_init_fn, base_seed=args.seed)
 
-    persist = nw > 0
+    # Restart workers at each epoch so their RNG state is reconstructible on resume.
+    persist = False
+    args.num_workers = nw
+    args.prefetch_factor = prefetch_eff
     prefetch = prefetch_eff if nw > 0 else None
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
@@ -567,6 +596,8 @@ def main():
         prefetch_factor=prefetch,
         drop_last=True,
     )
+    if not args.eval_only and len(train_loader) == 0:
+        raise ValueError("Training loader has no batches; reduce --batch-size or add training samples")
     val_loader = DataLoader(
         val_ds, batch_size=args.batch_size, shuffle=False,
         num_workers=nw, pin_memory=pin_mem,
@@ -604,16 +635,17 @@ def main():
     if preloaded_ckpt is not None:
         _tgt = model._orig_mod if hasattr(model, "_orig_mod") else model
         _tgt.load_state_dict(state_dict_from_checkpoint(preloaded_ckpt))
-    elif args.resume:
-        print(f"\n从 checkpoint 恢复: {args.resume}")
-        ckpt = load_model_checkpoint(args.resume, map_location=device)
+    elif resume_state is not None:
+        if resume_state["runtime"] != {"device": str(device), "amp": use_amp, "compile": use_compile}:
+            raise ValueError("Resume requires the original device/AMP/compile settings; use --init-weights for transfer")
+        _tgt = model._orig_mod if hasattr(model, "_orig_mod") else model
+        _tgt.load_state_dict(resume_state["model_state_dict"])
+        start_epoch = resume_state["epoch"] + 1
+        best_val_loss = resume_state["best_val_loss"]
+    elif args.init_weights:
+        ckpt = load_model_checkpoint(args.init_weights, map_location=device)
         _tgt = model._orig_mod if hasattr(model, "_orig_mod") else model
         _tgt.load_state_dict(state_dict_from_checkpoint(ckpt))
-        if isinstance(ckpt, dict):
-            if "epoch" in ckpt:
-                start_epoch = ckpt["epoch"] + 1
-            if "val_loss" in ckpt:
-                best_val_loss = ckpt["val_loss"]
 
     if not args.eval_only and ema_decay > 0:
         ema_model = build_model(n_channels=n_ch, dropout=args.dropout, arch=args.arch).to(device)
@@ -656,6 +688,29 @@ def main():
         print("─" * 62)
 
         patience_cnt = 0
+        best_checkpoint = None
+        if resume_state is not None:
+            optimizer.load_state_dict(resume_state["optimizer"])
+            scheduler.load_state_dict(resume_state["scheduler"])
+            if scaler is not None:
+                scaler.load_state_dict(resume_state["scaler"])
+            if ema_model is not None:
+                ema_model.load_state_dict(resume_state["ema"])
+            if swa_model is not None:
+                swa_model.load_state_dict(resume_state["swa"])
+                swa_scheduler.load_state_dict(resume_state["swa_scheduler"])
+            patience_cnt = resume_state["patience_cnt"]
+            train_losses, val_losses, val_maes = resume_state["history"]
+            best_checkpoint = resume_state["best_checkpoint"]
+            atomic_save(best_checkpoint, model_path)
+            with open(log_csv, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["epoch", "train_loss", "val_loss", "val_mae_deg", "lr"])
+                writer.writerows(resume_state["log_rows"])
+            restore_rng(resume_state["rng"], gen)
+            if start_epoch > args.epochs or patience_cnt >= args.patience:
+                raise ValueError("Training plan already completed or early-stopped; use --eval-only or --init-weights")
+        log_rows = list(resume_state["log_rows"]) if resume_state is not None else []
 
         if start_epoch == 1:
             with open(log_csv, "w", newline="") as f:
@@ -681,6 +736,8 @@ def main():
                 progress=show_batch_pb, desc=f"ep{epoch} val",
                 huber_delta=args.huber_delta, angle_loss_weight=angle_loss_w,
             )
+            if not np.isfinite(train_loss) or not np.isfinite(val_loss):
+                raise ValueError("Training or validation loss is non-finite; checkpoint not updated")
             if args.swa and swa_model is not None and epoch >= swa_start:
                 swa_model.update_parameters(model)
                 if swa_scheduler is not None:
@@ -701,8 +758,7 @@ def main():
                 patience_cnt = 0
                 _save_src = ema_model if (ema_model is not None and ema_decay > 0) else (model._orig_mod if hasattr(model, "_orig_mod") else model)
                 save_sd = _save_src.state_dict()
-                torch.save(
-                    {
+                best_checkpoint = {
                         "model_state_dict": save_sd,
                         "model_version": "v5",
                         "arch": args.arch,
@@ -719,9 +775,11 @@ def main():
                         "ema_decay": ema_decay,
                         "angle_loss_weight": angle_loss_w,
                         "huber_delta": float(args.huber_delta),
-                    },
-                    model_path,
-                )
+                    }
+                # Freeze the best weights; later optimizer updates must not mutate this snapshot.
+                import copy
+                best_checkpoint = copy.deepcopy(best_checkpoint)
+                atomic_save(best_checkpoint, model_path)
                 flag = " ✓"
             else:
                 patience_cnt += 1
@@ -738,6 +796,25 @@ def main():
                 writer = csv.writer(f)
                 writer.writerow([epoch, train_loss, val_loss, val_mae, lr])
 
+            log_rows.append([epoch, train_loss, val_loss, val_mae, lr])
+            raw_model = model._orig_mod if hasattr(model, "_orig_mod") else model
+            atomic_save({
+                "training_state_version": 1, "model_state_dict": raw_model.state_dict(),
+                "args": vars(args).copy(), "epoch": epoch, "best_val_loss": best_val_loss,
+                "data_sha256": data_sha256, "dataset_path": os.path.abspath(dataset_path),
+                "runtime": {"device": str(device), "amp": use_amp, "compile": use_compile},
+                "best_checkpoint": best_checkpoint, "patience_cnt": patience_cnt,
+                "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict() if scaler is not None else None,
+                "ema": ema_model.state_dict() if ema_model is not None else None,
+                "swa": swa_model.state_dict() if swa_model is not None else None,
+                "swa_scheduler": swa_scheduler.state_dict() if swa_model is not None else None,
+                "rng": capture_rng(gen), "history": (train_losses, val_losses, val_maes),
+                "log_rows": log_rows,
+            }, training_path)
+            if args.stop_after_epoch is not None and epoch >= args.stop_after_epoch:
+                print(f"Saved complete training state: {training_path}")
+                return
             if patience_cnt >= args.patience:
                 print(f"\n早停触发（{args.patience} epoch val loss 未改善）")
                 break
